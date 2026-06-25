@@ -22,18 +22,18 @@
       let
         pkgs = import nixpkgs { inherit system; };
 
-        # Where the authoritative contract + canonical codegen script live in the daemon-node submodule.
+        # Where the canonical codegen script + client-view CDDL live in the daemon-node submodule.
         codegenScript = ./daemon-node/crates/contracts/daemon-api/zcbor-codegen.sh;
-        smokeCddl = ./daemon-node/crates/contracts/daemon-api/zcbor-smoke.cddl;
+        clientCddl = ./daemon-node/crates/contracts/daemon-api/daemon-api-client.cddl;
         # The checked-in copy daemon-app compiles (no Python/zcbor in the Qt build).
         vendoredCodec = ./daemon-app/src/core/daemon/codec/generated;
 
         codecFiles = [
-          "daemon_api_smoke_decode.c"
-          "daemon_api_smoke_decode.h"
-          "daemon_api_smoke_encode.c"
-          "daemon_api_smoke_encode.h"
-          "daemon_api_smoke_types.h"
+          "daemon_api_client_decode.c"
+          "daemon_api_client_decode.h"
+          "daemon_api_client_encode.c"
+          "daemon_api_client_encode.h"
+          "daemon_api_client_types.h"
         ];
 
         # Pure codegen: daemon-api contract (CDDL) + zcbor -> generated C/H, in the store. This is the
@@ -44,7 +44,7 @@
           }
           ''
             mkdir -p "$out"
-            bash ${codegenScript} ${smokeCddl} "$out"
+            bash ${codegenScript} ${clientCddl} "$out"
           '';
       in
       {
