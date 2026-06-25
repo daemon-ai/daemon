@@ -428,6 +428,25 @@ pub fn run_gui_offscreen(bin: &std::path::Path, socket: &std::path::Path, page: 
     run_with_timeout(cmd, tmp, Duration::from_secs(30))
 }
 
+/// Drive the GUI headless until its daemon-mode auto-connect reaches "ready" (a real Health
+/// round-trip) or times out, then exit. Prints `DAEMON_APP_READY ok|timeout` on stdout. Lets a
+/// scenario hard-assert connectivity instead of racing the async connect.
+pub fn run_gui_wait_ready(bin: &std::path::Path, socket: &std::path::Path, timeout_ms: u32) -> Result<ClientRun> {
+    let (mut cmd, tmp) = isolated_client_command(bin, socket)?;
+    cmd.env("QT_QPA_PLATFORM", "offscreen")
+        .env("DAEMON_APP_WAIT_READY", timeout_ms.to_string());
+    run_with_timeout(cmd, tmp, Duration::from_secs(30))
+}
+
+/// Drive the TUI headless until its daemon-mode auto-connect reaches "ready" or times out (printing
+/// `DAEMON_APP_READY ok|timeout`), then dump one frame. Same hard-assert contract as the GUI.
+pub fn run_tui_wait_ready(bin: &std::path::Path, socket: &std::path::Path, dims: (u16, u16), timeout_ms: u32) -> Result<ClientRun> {
+    let (mut cmd, tmp) = isolated_client_command(bin, socket)?;
+    cmd.env("DAEMON_TUI_OFFSCREEN", format!("{}x{}", dims.0, dims.1))
+        .env("DAEMON_APP_WAIT_READY", timeout_ms.to_string());
+    run_with_timeout(cmd, tmp, Duration::from_secs(30))
+}
+
 /// Drive the TUI (`daemon-tui`) in its offscreen frame-dump harness against `socket`: feed an
 /// optional key sequence / typed text, settle, and dump one rendered frame to stdout.
 pub fn run_tui_offscreen(

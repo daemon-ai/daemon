@@ -8,9 +8,13 @@
 //! harness/offscreen-mode enhancement tracked in the plan.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use daemon_api::ApiRequest;
-use daemon_system_tests::{run_gui_offscreen, run_tui_offscreen, Daemon, RecordingProxy};
+use daemon_system_tests::{
+    run_gui_offscreen, run_gui_wait_ready, run_tui_offscreen, run_tui_wait_ready, Daemon,
+    RecordingProxy,
+};
 
 fn have_daemon() -> bool {
     std::env::var_os("DAEMON_BIN").is_some() && std::env::var_os("DAEMON_CLI_BIN").is_some()
@@ -89,4 +93,77 @@ fn tui_offscreen_initializes_in_daemon_mode() {
         .iter()
         .any(|r| matches!(r, ApiRequest::Health));
     eprintln!("tui daemon-mode Health probe observed over the socket: {health}");
+}
+
+/// Hard-assert connectivity: with DAEMON_APP_WAIT_READY the GUI blocks until its Health round-trip
+/// resolves, so we can assert both the readiness sentinel and that the daemon observed Health plus
+/// the auto SessionsQuery that fires once the connection is ready.
+#[test]
+fn gui_daemon_mode_reaches_ready_and_queries_sessions() {
+    if !have_daemon() {
+        eprintln!("skipping gui_daemon_mode_reaches_ready_and_queries_sessions: daemon binaries unset");
+        return;
+    }
+    let gui = match std::env::var_os("CLIENT_GUI_BIN") {
+        Some(p) => PathBuf::from(p),
+        None => {
+            eprintln!("skipping gui_daemon_mode_reaches_ready_and_queries_sessions: CLIENT_GUI_BIN unset");
+            return;
+        }
+    };
+
+    let daemon = Daemon::start().expect("daemon becomes ready");
+    let proxy = RecordingProxy::start(daemon.socket.clone()).expect("proxy starts");
+
+    let run = run_gui_wait_ready(&gui, &proxy.socket, 5000).expect("gui runs");
+    assert!(
+        run.success && run.stdout.contains("DAEMON_APP_READY ok"),
+        "GUI did not reach daemon-ready.\nstdout:\n{}\nstderr:\n{}\ndaemon log:\n{}",
+        run.stdout,
+        run.stderr,
+        daemon.log_contents()
+    );
+
+    proxy
+        .wait_for_request(|r| matches!(r, ApiRequest::Health), Duration::from_secs(2))
+        .expect("GUI sent a Health probe");
+    proxy
+        .wait_for_request(|r| matches!(r, ApiRequest::SessionsQuery { .. }), Duration::from_secs(2))
+        .expect("GUI sent a SessionsQuery once ready");
+}
+
+/// Same hard-assert for the TUI: the readiness block makes the Health probe assertable (previously
+/// only logged), and the auto SessionsQuery on ready is observed at the socket.
+#[test]
+fn tui_daemon_mode_reaches_ready_and_queries_sessions() {
+    if !have_daemon() {
+        eprintln!("skipping tui_daemon_mode_reaches_ready_and_queries_sessions: daemon binaries unset");
+        return;
+    }
+    let tui = match std::env::var_os("CLIENT_TUI_BIN") {
+        Some(p) => PathBuf::from(p),
+        None => {
+            eprintln!("skipping tui_daemon_mode_reaches_ready_and_queries_sessions: CLIENT_TUI_BIN unset");
+            return;
+        }
+    };
+
+    let daemon = Daemon::start().expect("daemon becomes ready");
+    let proxy = RecordingProxy::start(daemon.socket.clone()).expect("proxy starts");
+
+    let run = run_tui_wait_ready(&tui, &proxy.socket, (40, 120), 5000).expect("tui runs");
+    assert!(
+        run.stdout.contains("DAEMON_APP_READY ok"),
+        "TUI did not reach daemon-ready.\nstdout:\n{}\nstderr:\n{}\ndaemon log:\n{}",
+        run.stdout,
+        run.stderr,
+        daemon.log_contents()
+    );
+
+    proxy
+        .wait_for_request(|r| matches!(r, ApiRequest::Health), Duration::from_secs(2))
+        .expect("TUI sent a Health probe");
+    proxy
+        .wait_for_request(|r| matches!(r, ApiRequest::SessionsQuery { .. }), Duration::from_secs(2))
+        .expect("TUI sent a SessionsQuery once ready");
 }
