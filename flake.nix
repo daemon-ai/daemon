@@ -9,6 +9,12 @@
   # NOTE: the daemon-node / daemon-app submodule contents are gitlinks, so this flake must be
   # evaluated with submodule visibility, e.g. `nix build '.?submodules=1#daemon-zcbor-codec'`.
   # The justfile wraps the common commands so callers don't have to remember the flag.
+  #
+  # This flake owns only the cross-cutting concern (codec sync). The children keep their own flakes
+  # as the source of truth for their builds (daemon-node: `.#daemon` / `.#daemon-cli`; daemon-app:
+  # `.#default` / `.#tui`); the justfile + CI build them directly. We deliberately do NOT import the
+  # child flakes as path inputs here - that would force `?submodules=1` onto every passthrough build
+  # and couple this flake to both children's full input closures.
   outputs =
     { self, nixpkgs, flake-utils }:
     flake-utils.lib.eachDefaultSystem (

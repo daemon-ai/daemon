@@ -1,0 +1,87 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The wire contract: prove the generated C codec round-trips real ciborium bytes, and that
+  # daemon-app's vendored copy matches what the pinned daemon-node contract generates.
+  codec:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: verify-codec (daemon-node decode proof)
+        run: cd daemon-node && nix build ".#checks.x86_64-linux.verify-codec" -L
+      - name: codec-drift (vendored vs generated)
+        run: nix build ".?submodules=1#checks.x86_64-linux.codec-drift" -L
+
+  # daemon-node's own gate: build the host + CLI and run the workspace tests.
+  daemon-node:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: build daemon + daemon-cli
+        run: cd daemon-node && nix build ".#daemon" ".#daemon-cli" -L
+      - name: workspace tests
+        run: cd daemon-node && nix develop --command cargo test --workspace
+
+  # daemon-app's own gate: build both frontends and run the Qt/CTest suite.
+  daemon-app:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: build GUI + TUI
+        run: |
+          nix build ./daemon-app#default --out-link result-app -L
+          nix build ./daemon-app#tui --out-link result-tui -L
+
+  # The cross-repo end-to-end suite, run against the exact binaries built above.
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: build daemon binaries (debug)
+        run: cd daemon-node && nix develop --command cargo build -p daemon -p daemon-cli
+      - name: build client frontends
+        run: |
+          nix build ./daemon-app#default --out-link result-app -L
+          nix build ./daemon-app#tui --out-link result-tui -L
+      - name: run system-tests
+        run: |
+          export DAEMON_BIN="$PWD/daemon-node/target/debug/daemon"
+          export DAEMON_CLI_BIN="$PWD/daemon-node/target/debug/daemon-cli"
+          export CLIENT_GUI_BIN="$PWD/result-app/bin/daemon-app"
+          export CLIENT_TUI_BIN="$PWD/result-tui/bin/daemon-tui"
+          cd system-tests && nix develop ../daemon-node --command cargo test -- --test-threads=1
+      - name: upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-artifacts
+          path: |
+            system-tests/target/nextest/**
+            result-app/**/*.png
+          if-no-files-found: ignore
+          retention-days: 7
