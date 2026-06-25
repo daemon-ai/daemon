@@ -25,8 +25,10 @@
         # Where the canonical codegen script + client-view CDDL live in the daemon-node submodule.
         codegenScript = ./daemon-node/crates/contracts/daemon-api/zcbor-codegen.sh;
         clientCddl = ./daemon-node/crates/contracts/daemon-api/daemon-api-client.cddl;
-        # The checked-in copy daemon-app compiles (no Python/zcbor in the Qt build).
+        # The checked-in copies daemon-app compiles (no Python/zcbor in the Qt build): the generated
+        # codec, and the zcbor C runtime copied alongside it.
         vendoredCodec = ./daemon-app/src/core/daemon/codec/generated;
+        vendoredRuntime = ./daemon-app/src/core/daemon/codec/vendor;
 
         codecFiles = [
           "daemon_api_client_decode.c"
@@ -35,16 +37,30 @@
           "daemon_api_client_encode.h"
           "daemon_api_client_types.h"
         ];
+        # The zcbor runtime that `--copy-sources` emits; drift-checked too so a nixpkgs zcbor bump
+        # can't desync the vendored runtime from the generated code.
+        runtimeFiles = [
+          "zcbor_common.c"
+          "zcbor_common.h"
+          "zcbor_decode.c"
+          "zcbor_decode.h"
+          "zcbor_encode.c"
+          "zcbor_encode.h"
+          "zcbor_print.c"
+          "zcbor_print.h"
+          "zcbor_tags.h"
+        ];
 
-        # Pure codegen: daemon-api contract (CDDL) + zcbor -> generated C/H, in the store. This is the
-        # single place codegen runs in CI; nothing here mutates the working tree.
+        # Pure codegen: daemon-api contract (CDDL) + zcbor -> generated C/H AND the zcbor runtime
+        # (--copy-sources), in the store. The single place codegen runs in CI; nothing here mutates
+        # the working tree.
         daemon-zcbor-codec = pkgs.runCommand "daemon-zcbor-codec"
           {
             nativeBuildInputs = [ pkgs.python3Packages.zcbor pkgs.bash ];
           }
           ''
             mkdir -p "$out"
-            bash ${codegenScript} ${clientCddl} "$out"
+            bash ${codegenScript} ${clientCddl} "$out" --copy-sources
           '';
       in
       {
@@ -58,19 +74,23 @@
           # generates. Pure: compares two store paths, never touches the working tree.
           codec-drift = pkgs.runCommand "codec-drift" { } ''
             gen=${daemon-zcbor-codec}
-            vend=${vendoredCodec}
             fail=0
-            for f in ${pkgs.lib.concatStringsSep " " codecFiles}; do
-              if ! diff -u "$vend/$f" "$gen/$f"; then
-                echo "DRIFT: daemon-app vendored $f differs from generated" >&2
-                fail=1
-              fi
-            done
+            check() {
+              local src="$1" name="$2"; shift 2
+              for f in "$@"; do
+                if ! diff -u "$src/$f" "$gen/$f"; then
+                  echo "DRIFT: daemon-app vendored $name/$f differs from generated" >&2
+                  fail=1
+                fi
+              done
+            }
+            check ${vendoredCodec} generated ${pkgs.lib.concatStringsSep " " codecFiles}
+            check ${vendoredRuntime} vendor ${pkgs.lib.concatStringsSep " " runtimeFiles}
             if [ "$fail" -ne 0 ]; then
-              echo "vendored codec is stale vs the pinned daemon-node contract; run: nix run .#update-codec" >&2
+              echo "vendored codec/runtime is stale vs the pinned daemon-node contract; run: nix run .#update-codec" >&2
               exit 1
             fi
-            echo "vendored codec matches the generated codec"
+            echo "vendored codec + runtime match the generated output"
             touch "$out"
           '';
         };
@@ -86,21 +106,70 @@
                   name = "update-codec";
                   runtimeInputs = [ pkgs.coreutils ];
                   text = ''
-                    dest="daemon-app/src/core/daemon/codec/generated"
-                    if [ ! -d "$dest" ]; then
-                      echo "run from the superproject root (missing $dest)" >&2
+                    gendest="daemon-app/src/core/daemon/codec/generated"
+                    vendest="daemon-app/src/core/daemon/codec/vendor"
+                    if [ ! -d "$gendest" ] || [ ! -d "$vendest" ]; then
+                      echo "run from the superproject root (missing codec dirs)" >&2
                       exit 1
                     fi
                     for f in ${pkgs.lib.concatStringsSep " " codecFiles}; do
-                      install -m644 "${daemon-zcbor-codec}/$f" "$dest/$f"
+                      install -m644 "${daemon-zcbor-codec}/$f" "$gendest/$f"
                     done
-                    echo "updated $dest from ${daemon-zcbor-codec}"
+                    for f in ${pkgs.lib.concatStringsSep " " runtimeFiles}; do
+                      install -m644 "${daemon-zcbor-codec}/$f" "$vendest/$f"
+                    done
+                    echo "updated $gendest + $vendest from ${daemon-zcbor-codec}"
                   '';
                 };
               in
               "${script}/bin/update-codec";
           };
-          default = self.apps.${system}.update-codec;
+
+          # Read-only default: a bare `nix run` never mutates the tree - it prints usage and reports
+          # codec drift. Mutation requires `.#update-codec` explicitly.
+          status = {
+            type = "app";
+            program =
+              let
+                script = pkgs.writeShellApplication {
+                  name = "daemon-status";
+                  runtimeInputs = [ pkgs.coreutils pkgs.diffutils ];
+                  text = ''
+                    echo "daemon superproject (read-only status)"
+                    echo
+                    echo "  nix run .#update-codec                                  regenerate vendored codec (mutates tree)"
+                    echo "  nix build '.?submodules=1#checks.<system>.codec-drift'  gate: vendored vs generated"
+                    echo "  just                                                    list build / codec / e2e tasks"
+                    echo
+                    gendest="daemon-app/src/core/daemon/codec/generated"
+                    vendest="daemon-app/src/core/daemon/codec/vendor"
+                    if [ ! -d "$gendest" ]; then
+                      echo "codec: run from the superproject root to report drift"
+                      exit 0
+                    fi
+                    drift=0
+                    for f in ${pkgs.lib.concatStringsSep " " codecFiles}; do
+                      if ! diff -q "${daemon-zcbor-codec}/$f" "$gendest/$f" >/dev/null 2>&1; then
+                        drift=1
+                      fi
+                    done
+                    for f in ${pkgs.lib.concatStringsSep " " runtimeFiles}; do
+                      if ! diff -q "${daemon-zcbor-codec}/$f" "$vendest/$f" >/dev/null 2>&1; then
+                        drift=1
+                      fi
+                    done
+                    if [ "$drift" -eq 0 ]; then
+                      echo "codec: in sync with the pinned daemon-node contract"
+                    else
+                      echo "codec: STALE - run: nix run .#update-codec"
+                    fi
+                  '';
+                };
+              in
+              "${script}/bin/daemon-status";
+          };
+
+          default = self.apps.${system}.status;
         };
       }
     );
