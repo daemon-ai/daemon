@@ -40,6 +40,9 @@ codec-drift:
 update-codec:
     nix run ".?submodules=1#update-codec"
 
+# Regenerate the vendored codec, then build everything (the "clean automatic" path).
+sync: update-codec build-all
+
 # --- end-to-end -----------------------------------------------------------
 
 # Run the cross-repo E2E suite against freshly built binaries.
