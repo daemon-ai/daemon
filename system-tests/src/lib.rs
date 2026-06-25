@@ -354,3 +354,96 @@ pub fn run_cli(cli: &std::path::Path, socket: &std::path::Path, args: &[&str]) -
         .with_context(|| format!("running {} {:?}", cli.display(), args))?;
     Ok((out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned()))
 }
+
+/// The captured result of a one-shot client run (offscreen GUI render / TUI frame dump).
+#[derive(Debug)]
+pub struct ClientRun {
+    pub success: bool,
+    pub stdout: String,
+    pub stderr: String,
+    /// Kept alive so the isolated HOME/XDG dirs outlive the run for diagnostics.
+    _tmp: TempDir,
+}
+
+fn isolated_client_command(bin: &std::path::Path, socket: &std::path::Path) -> Result<(Command, TempDir)> {
+    let tmp = tempfile::Builder::new()
+        .prefix("dstc-")
+        .tempdir_in("/tmp")
+        .context("creating client temp root")?;
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&home)?;
+    // Seed the shared QSettings ("daemon-app"/"daemon-app") so the client treats setup as complete
+    // and auto-connects in local mode; the socket itself comes from DAEMON_APP_SOCKET below.
+    let cfg_dir = home.join(".config/daemon-app");
+    std::fs::create_dir_all(&cfg_dir)?;
+    std::fs::write(
+        cfg_dir.join("daemon-app.conf"),
+        "[app]\nsetupComplete=true\n\n[conn]\nmode=local\n",
+    )?;
+    let mut cmd = Command::new(bin);
+    cmd.env("DAEMON_APP_SERVICE_MODE", "daemon")
+        .env("DAEMON_APP_SOCKET", socket)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_CACHE_HOME", home.join(".cache"))
+        .env("LANG", "C.UTF-8");
+    Ok((cmd, tmp))
+}
+
+fn run_with_timeout(mut cmd: Command, tmp: TempDir, timeout: Duration) -> Result<ClientRun> {
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().context("spawning client")?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait()? {
+            Some(_) => break,
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                break;
+            }
+            None => thread::sleep(Duration::from_millis(20)),
+        }
+    }
+    let out = child.wait_with_output()?;
+    Ok(ClientRun {
+        success: out.status.success(),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        _tmp: tmp,
+    })
+}
+
+/// Drive the GUI (`daemon-app`) in its offscreen render-shot harness against `socket`. Renders the
+/// requested page to PNGs in a temp dir and exits; assert on the protocol trace the proxy captured.
+pub fn run_gui_offscreen(bin: &std::path::Path, socket: &std::path::Path, page: Option<&str>) -> Result<ClientRun> {
+    let (mut cmd, tmp) = isolated_client_command(bin, socket)?;
+    let shots = tmp.path().join("shots");
+    std::fs::create_dir_all(&shots)?;
+    cmd.env("QT_QPA_PLATFORM", "offscreen")
+        .env("DAEMON_APP_RENDER_SHOTS", &shots);
+    if let Some(page) = page {
+        cmd.env("DAEMON_APP_RENDER_PAGE", page);
+    }
+    run_with_timeout(cmd, tmp, Duration::from_secs(30))
+}
+
+/// Drive the TUI (`daemon-tui`) in its offscreen frame-dump harness against `socket`: feed an
+/// optional key sequence / typed text, settle, and dump one rendered frame to stdout.
+pub fn run_tui_offscreen(
+    bin: &std::path::Path,
+    socket: &std::path::Path,
+    dims: (u16, u16),
+    keys: Option<&str>,
+    typ: Option<&str>,
+) -> Result<ClientRun> {
+    let (mut cmd, tmp) = isolated_client_command(bin, socket)?;
+    cmd.env("DAEMON_TUI_OFFSCREEN", format!("{}x{}", dims.0, dims.1));
+    if let Some(keys) = keys {
+        cmd.env("DAEMON_TUI_KEYS", keys);
+    }
+    if let Some(typ) = typ {
+        cmd.env("DAEMON_TUI_TYPE", typ);
+    }
+    run_with_timeout(cmd, tmp, Duration::from_secs(30))
+}
