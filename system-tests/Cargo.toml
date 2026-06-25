@@ -1,0 +1,18 @@
+[package]
+name = "daemon-system-tests"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Cross-repo end-to-end tests: drive the real GUI/TUI client against the real daemon over an isolated Unix socket, asserting on a typed protocol trace."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# Path dependency into the daemon-node submodule. daemon-api resolves its own `workspace = true`
+# inheritance against daemon-node/Cargo.toml, so the harness decodes frames with the daemon's own
+# CBOR types - no second codec, no drift.
+daemon-api = { path = "../daemon-node/crates/contracts/daemon-api" }
+anyhow = "1"
+tempfile = "3"
+libc = "0.2"
