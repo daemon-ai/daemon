@@ -1,0 +1,6 @@
+[submodule "daemon-node"]
+	path = daemon-node
+	url = git@github.com:daemon-ai/daemon-node.git
+[submodule "daemon-app"]
+	path = daemon-app
+	url = git@github.com:daemon-ai/daemon-app.git

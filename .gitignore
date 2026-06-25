@@ -1,0 +1,10 @@
+/result
+/result-*
+target/
+*.rs.bk
+
+# E2E artifacts (logs, screenshots, terminal dumps, protocol traces)
+/system-tests/artifacts/
+
+.DS_Store
+.direnv/
