@@ -20,9 +20,11 @@ jobs:
           submodules: recursive
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
-      - name: verify-codec (daemon-node decode proof)
+      - name: cddl parity (full mirror covers every Rust wire variant)
+        run: cd daemon-node && nix develop --command cargo run -p xtask -- cddl
+      - name: verify-codec (decode proof + client-surface fixture coverage)
         run: cd daemon-node && nix build ".#checks.x86_64-linux.verify-codec" -L
-      - name: codec-drift (vendored vs generated)
+      - name: codec-drift (vendored codec + runtime vs generated)
         run: nix build ".?submodules=1#checks.x86_64-linux.codec-drift" -L
 
   # daemon-node's own gate: build the host + CLI and run the workspace tests.
@@ -39,7 +41,7 @@ jobs:
       - name: workspace tests
         run: cd daemon-node && nix develop --command cargo test --workspace
 
-  # daemon-app's own gate: build both frontends and run the Qt/CTest suite.
+  # daemon-app's own gate: build both frontends (packaged) and run the Qt/CTest suite headless.
   daemon-app:
     runs-on: ubuntu-latest
     steps:
@@ -48,10 +50,23 @@ jobs:
           submodules: recursive
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
-      - name: build GUI + TUI
+      - name: build GUI + TUI (packaged)
         run: |
           nix build ./daemon-app#default --out-link result-app -L
           nix build ./daemon-app#tui --out-link result-tui -L
+      - name: Qt/CTest suite (headless, GUI + TUI)
+        run: |
+          cd daemon-app
+          nix develop --command bash -c '
+            set -e
+            cmake -B build-ci -G Ninja -DBUILD_TESTING=ON -DDAEMON_APP_TUI=ON \
+              -DMD4QT_SOURCE_DIR="$MD4QT_SOURCE_DIR" -DEARCUT_SOURCE_DIR="$EARCUT_SOURCE_DIR" \
+              -DKSYNTAXHIGHLIGHTING_SOURCE_DIR="$KSYNTAXHIGHLIGHTING_SOURCE_DIR" -DMICROTEX_SOURCE_DIR="$MICROTEX_SOURCE_DIR" \
+              -DQWINDOWKIT_SOURCE_DIR="$QWINDOWKIT_SOURCE_DIR" -DQSIMPLEUPDATER_SOURCE_DIR="$QSIMPLEUPDATER_SOURCE_DIR" \
+              -DQAUTOSTART_SOURCE_DIR="$QAUTOSTART_SOURCE_DIR" -DQXTGLOBALSHORTCUT_SOURCE_DIR="$QXTGLOBALSHORTCUT_SOURCE_DIR"
+            cmake --build build-ci
+            QT_QPA_PLATFORM=offscreen ctest --test-dir build-ci --output-on-failure
+          '
 
   # The cross-repo end-to-end suite, run against the exact binaries built above.
   e2e:

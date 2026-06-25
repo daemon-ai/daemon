@@ -14,7 +14,10 @@ the cross-repo end-to-end integration tests.
 - `system-tests/` - the Rust end-to-end harness that drives the real GUI/TUI
   binaries against a real daemon over an isolated Unix socket, asserting on a
   typed protocol trace (decoded with `daemon-api`'s own types).
-- `tools/` - cross-repo automation (codec vendoring/drift checks).
+- `flake.nix` - the cross-repo codec sync: a pure `packages.daemon-zcbor-codec`
+  derivation, a `checks.codec-drift` gate, and an `apps.update-codec` helper.
+- `justfile` - one entry point for builds, the codec contract, and the E2E suite
+  (`just` to list recipes).
 
 ## Working with submodules
 
@@ -31,6 +34,19 @@ integration layer on top.
 ## Contract ownership
 
 `daemon-node` is authoritative for the wire contract (`daemon-api.cddl` +
-ciborium types) and owns C codec generation and its proof. `daemon-app` vendors
-the checked-in generated C and compiles it (no Python in its build). The
-superproject keeps the vendored copy in sync via `tools/` and fails CI on drift.
+ciborium types) and owns C codec generation and its proof (`xtask verify-codec`).
+The client-generatable view is `daemon-api-client.cddl`; `daemon-app` vendors the
+checked-in generated C (`daemon_api_client_*`) plus the zcbor runtime and
+compiles them (no Python in its build).
+
+The superproject keeps the vendored copy in sync the Nix-idiomatic way. The
+submodule contents are gitlinks, so these need `?submodules=1`:
+
+```sh
+nix build '.?submodules=1#checks.<system>.codec-drift'  # gate: vendored vs generated
+nix run   '.?submodules=1#update-codec'                 # regenerate into the working tree
+nix run   '.?submodules=1'                              # read-only status + drift report
+```
+
+CI builds the pure derivation and fails on drift; nothing mutates the tree
+except the explicit `update-codec`.
