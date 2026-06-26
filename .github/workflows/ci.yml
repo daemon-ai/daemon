@@ -67,11 +67,25 @@ jobs:
             cmake --build build-ci
             QT_QPA_PLATFORM=offscreen ctest --test-dir build-ci --output-on-failure
           '
+      - name: C++ static analysis (clang-format + clang-tidy + qmllint)
+        run: |
+          cd daemon-app
+          nix develop --command bash -euo pipefail -c '
+            echo "== clang-format =="
+            git ls-files "src/*.cpp" "src/*.h" "tests/*.cpp" "tests/*.h" | xargs clang-format --dry-run --Werror
+            echo "== clang-tidy (WarningsAsErrors) =="
+            git ls-files "src/*.cpp" | xargs -P"$(nproc)" -n1 clang-tidy -p build-ci --quiet
+            echo "== qmllint =="
+            qmllint_status=0
+            while IFS= read -r -d "" rsp; do qmllint @"$rsp" || qmllint_status=1; done \
+              < <(find build-ci -path "*/.rcc/qmllint/*_module.rsp" -print0)
+            [ "$qmllint_status" -eq 0 ]
+          '
 
   # Static-analysis gates mirroring the local `just lint-rust` / `just deny`. Blocking: the Rust
-  # backlog (rustfmt/clippy) and the secret/spell scans are all clean as of this commit. The heavier
-  # C++ clang-tidy gate (`just lint-cpp`) is intentionally not run here - it needs a full Qt build and
-  # still carries a tuned ~326-warning backlog; run it locally until that is worked down.
+  # backlog (rustfmt/clippy) and the secret/spell scans are all clean as of this commit. The C++
+  # clang-tidy/clang-format/qmllint gate is now clean too and runs (blocking) in the daemon-app job
+  # above, reusing its build-ci compile database.
   lint:
     runs-on: ubuntu-latest
     steps:
