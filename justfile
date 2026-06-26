@@ -101,11 +101,15 @@ lint-cpp:
       # clang-tools ships clang-tidy but not the run-clang-tidy wrapper; drive it per-TU in parallel.
       git ls-files "src/*.cpp" | xargs -r -P "$(nproc)" -n1 clang-tidy -p build-lint --quiet
       echo "== qmllint =="
-      # NOTE: the aggregate all_qmllint target currently fails under Qt 6.11 + Ninja due to an
-      # unexpanded $<IF:...> generator expression (a Qt/CMake tooling bug, not a QML defect).
-      # Kept non-fatal until that is resolved so the rest of the C++ gate still runs.
-      cmake --build build-lint --target all_qmllint \
-        || echo "WARNING: all_qmllint failed (known Qt genexpr issue) - QML not linted this run"
+      # The aggregate all_qmllint target is broken under Qt 6.11 + Ninja (an unexpanded $<IF:...>
+      # generator expression - a Qt/CMake bug, not a QML defect). Drive qmllint per module via the
+      # generated *_module.rsp response files instead; each lints one QML module by name. qmllint
+      # warnings are exit 0 (surfaced, non-fatal); only hard errors fail the gate.
+      qmllint_status=0
+      while IFS= read -r -d "" rsp; do
+        qmllint @"$rsp" || qmllint_status=1
+      done < <(find build-lint -path "*/.rcc/qmllint/*_module.rsp" -print0)
+      [ "$qmllint_status" -eq 0 ]
     '
 
 # Auto-fix what is mechanically fixable (rustfmt + clang-format + gersemi). Never run in a gate.
