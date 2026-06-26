@@ -1,0 +1,72 @@
+name: codeql
+
+# CodeQL security/dataflow scanning for both children of the superproject. Free for public
+# repos; results land in the Security > Code scanning tab. This complements (does not replace)
+# the local clippy / clang-tidy gates with cross-function dataflow + taint queries.
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  schedule:
+    # Weekly full scan (Mondays 04:17 UTC) so advisories surface even without a push.
+    - cron: "17 4 * * 1"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Rust extracts without a build (tree-sitter based), so no toolchain step is needed.
+          - language: rust
+            build-mode: none
+            source-root: daemon-node
+          # C/C++ must observe a real compilation; we drive the daemon-app Nix/CMake build
+          # (the same invocation as the `daemon-app` job in ci.yml) under manual build-mode.
+          - language: c-cpp
+            build-mode: manual
+            source-root: daemon-app
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Nix is only needed for the manual C/C++ build lane.
+      - if: matrix.build-mode == 'manual'
+        uses: DeterminateSystems/nix-installer-action@main
+      - if: matrix.build-mode == 'manual'
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          source-root: ${{ matrix.source-root }}
+
+      # Build the Qt client so CodeQL traces compilation. <DEP>_SOURCE_DIR vars come from the
+      # devShell env (CMake reads them), matching the ci.yml daemon-app build.
+      - if: matrix.build-mode == 'manual'
+        name: Build daemon-app (CodeQL trace)
+        run: |
+          nix develop ./daemon-app --command bash -c '
+            set -e
+            cmake -B build-codeql -G Ninja -DBUILD_TESTING=ON -DDAEMON_APP_TUI=ON
+            cmake --build build-codeql
+          '
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:${{ matrix.language }}

@@ -68,6 +68,27 @@ jobs:
             QT_QPA_PLATFORM=offscreen ctest --test-dir build-ci --output-on-failure
           '
 
+  # Static-analysis gates mirroring the local `just lint-rust` / `just deny`. Blocking: the Rust
+  # backlog (rustfmt/clippy) and the secret/spell scans are all clean as of this commit. The heavier
+  # C++ clang-tidy gate (`just lint-cpp`) is intentionally not run here - it needs a full Qt build and
+  # still carries a tuned ~326-warning backlog; run it locally until that is worked down.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: rustfmt + clippy (-D warnings)
+        run: nix run nixpkgs#just -- lint-rust
+      - name: cargo-deny (advisories / licenses / bans / sources)
+        run: nix run nixpkgs#just -- deny
+      - name: gitleaks (secret scan)
+        run: nix run nixpkgs#just -- secrets
+      - name: typos (spell check)
+        run: nix run nixpkgs#just -- spell
+
   # The cross-repo end-to-end suite, run against the exact binaries built above.
   e2e:
     runs-on: ubuntu-latest

@@ -1,0 +1,49 @@
+# typos config for the daemon superproject (used by `just spell` and the pre-commit hook).
+# Subdirectories inherit this file, so it covers daemon-node and daemon-app too.
+
+[files]
+extend-exclude = [
+  # Vendored third-party clones and build/codegen output - not ours to spell-check.
+  "daemon-node/research/**",
+  "**/target/**",
+  "**/build*/**",
+  "**/result-*/**",
+  "daemon-app/src/core/daemon/codec/generated/**",
+  "daemon-app/src/core/daemon/codec/vendor/**",
+  "*.lock",
+  # Intentional mangled text for pseudo-localization testing.
+  "**/pseudolocalize.py",
+]
+
+# Domain terms / library names / valid spelling variants / short identifier fragments that typos
+# misreads as errors (each verified a false positive in this codebase).
+[default.extend-words]
+invokable = "invokable"     # Qt's Q_INVOKABLE macro
+cose = "cose"               # COSE: CBOR Object Signing and Encryption
+tpe = "tpe"                 # common `type` placeholder identifier
+unparseable = "unparseable" # accepted variant of "unparsable"
+clonable = "clonable"       # accepted variant of "cloneable"
+togglable = "togglable"     # accepted variant of "toggleable"
+lod = "lod"                 # LOD: level-of-detail (e.g. m_lodTier)
+muc = "muc"                 # MUC: XMPP multi-user chat
+arange = "arange"           # numpy np.arange in skill examples
+canva = "canva"             # Canva (product name)
+# Short fragments typos extracts from larger identifiers/words/fixtures (PNGs, MorAlekss, ...).
+nd = "nd"
+ot = "ot"
+pn = "pn"
+ba = "ba"
+thm = "thm"
+thi = "thi"
+dout = "dout"
+mis = "mis"
+assum = "assum"
+slee = "slee"
+selec = "selec"
+hel = "hel"
+mor = "mor"
+alikes = "alikes"
+
+[default.extend-identifiers]
+ratatui = "ratatui"         # the Rust TUI crate
+Ratatui = "Ratatui"
