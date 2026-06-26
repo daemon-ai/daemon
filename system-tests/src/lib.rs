@@ -361,25 +361,50 @@ pub struct ClientRun {
     pub success: bool,
     pub stdout: String,
     pub stderr: String,
-    /// Kept alive so the isolated HOME/XDG dirs outlive the run for diagnostics.
-    _tmp: TempDir,
+    /// The client's isolated HOME, so a test can read back the persisted QSettings after the run.
+    pub home: PathBuf,
+    /// Kept alive so the isolated HOME/XDG dirs (and any spawned-daemon socket dir) outlive the run.
+    _tmps: Vec<TempDir>,
 }
 
-fn isolated_client_command(bin: &std::path::Path, socket: &std::path::Path) -> Result<(Command, TempDir)> {
+impl ClientRun {
+    /// Path to the client's persisted QSettings file after the run.
+    pub fn config_path(&self) -> PathBuf {
+        self.home.join(".config/daemon-app/daemon-app.conf")
+    }
+
+    /// Whether the client persisted `setupComplete=true` (CON-1: connection success persists setup).
+    pub fn persisted_setup_complete(&self) -> bool {
+        std::fs::read_to_string(self.config_path())
+            .map(|s| s.lines().any(|l| l.trim() == "setupComplete=true"))
+            .unwrap_or(false)
+    }
+}
+
+/// QSettings body for a returning user: setup complete, auto-connects in local mode.
+const CONF_SETUP_COMPLETE: &str = "[app]\nsetupComplete=true\n\n[conn]\nmode=local\n";
+/// QSettings body for a fresh first-run user who will drive the onboarding connect. Managed local
+/// daemon is on; shutdown-on-exit is on so a daemon the client spawns is reaped when it exits
+/// (no leaked process in the spawn scenario).
+const CONF_FRESH_MANAGED: &str =
+    "[app]\nsetupComplete=false\n\n[conn]\nmode=local\nmanagedLocalDaemon=true\nmanagedDaemonShutdownOnExit=true\n";
+
+fn isolated_client_command_with_conf(
+    bin: &std::path::Path,
+    socket: &std::path::Path,
+    conf: &str,
+) -> Result<(Command, TempDir, PathBuf)> {
     let tmp = tempfile::Builder::new()
         .prefix("dstc-")
         .tempdir_in("/tmp")
         .context("creating client temp root")?;
     let home = tmp.path().join("home");
     std::fs::create_dir_all(&home)?;
-    // Seed the shared QSettings ("daemon-app"/"daemon-app") so the client treats setup as complete
-    // and auto-connects in local mode; the socket itself comes from DAEMON_APP_SOCKET below.
+    // Seed the shared QSettings ("daemon-app"/"daemon-app"); the socket itself comes from
+    // DAEMON_APP_SOCKET below (which wins over the persisted target).
     let cfg_dir = home.join(".config/daemon-app");
     std::fs::create_dir_all(&cfg_dir)?;
-    std::fs::write(
-        cfg_dir.join("daemon-app.conf"),
-        "[app]\nsetupComplete=true\n\n[conn]\nmode=local\n",
-    )?;
+    std::fs::write(cfg_dir.join("daemon-app.conf"), conf)?;
     let mut cmd = Command::new(bin);
     cmd.env("DAEMON_APP_SERVICE_MODE", "daemon")
         .env("DAEMON_APP_SOCKET", socket)
@@ -388,10 +413,22 @@ fn isolated_client_command(bin: &std::path::Path, socket: &std::path::Path) -> R
         .env("XDG_DATA_HOME", home.join(".local/share"))
         .env("XDG_CACHE_HOME", home.join(".cache"))
         .env("LANG", "C.UTF-8");
-    Ok((cmd, tmp))
+    Ok((cmd, tmp, home))
 }
 
-fn run_with_timeout(mut cmd: Command, tmp: TempDir, timeout: Duration) -> Result<ClientRun> {
+fn isolated_client_command(
+    bin: &std::path::Path,
+    socket: &std::path::Path,
+) -> Result<(Command, TempDir, PathBuf)> {
+    isolated_client_command_with_conf(bin, socket, CONF_SETUP_COMPLETE)
+}
+
+fn run_with_timeout(
+    mut cmd: Command,
+    tmps: Vec<TempDir>,
+    home: PathBuf,
+    timeout: Duration,
+) -> Result<ClientRun> {
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().context("spawning client")?;
     let deadline = Instant::now() + timeout;
@@ -410,14 +447,15 @@ fn run_with_timeout(mut cmd: Command, tmp: TempDir, timeout: Duration) -> Result
         success: out.status.success(),
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        _tmp: tmp,
+        home,
+        _tmps: tmps,
     })
 }
 
 /// Drive the GUI (`daemon-app`) in its offscreen render-shot harness against `socket`. Renders the
 /// requested page to PNGs in a temp dir and exits; assert on the protocol trace the proxy captured.
 pub fn run_gui_offscreen(bin: &std::path::Path, socket: &std::path::Path, page: Option<&str>) -> Result<ClientRun> {
-    let (mut cmd, tmp) = isolated_client_command(bin, socket)?;
+    let (mut cmd, tmp, home) = isolated_client_command(bin, socket)?;
     let shots = tmp.path().join("shots");
     std::fs::create_dir_all(&shots)?;
     cmd.env("QT_QPA_PLATFORM", "offscreen")
@@ -425,26 +463,26 @@ pub fn run_gui_offscreen(bin: &std::path::Path, socket: &std::path::Path, page: 
     if let Some(page) = page {
         cmd.env("DAEMON_APP_RENDER_PAGE", page);
     }
-    run_with_timeout(cmd, tmp, Duration::from_secs(30))
+    run_with_timeout(cmd, vec![tmp], home, Duration::from_secs(30))
 }
 
 /// Drive the GUI headless until its daemon-mode auto-connect reaches "ready" (a real Health
 /// round-trip) or times out, then exit. Prints `DAEMON_APP_READY ok|timeout` on stdout. Lets a
 /// scenario hard-assert connectivity instead of racing the async connect.
 pub fn run_gui_wait_ready(bin: &std::path::Path, socket: &std::path::Path, timeout_ms: u32) -> Result<ClientRun> {
-    let (mut cmd, tmp) = isolated_client_command(bin, socket)?;
+    let (mut cmd, tmp, home) = isolated_client_command(bin, socket)?;
     cmd.env("QT_QPA_PLATFORM", "offscreen")
         .env("DAEMON_APP_WAIT_READY", timeout_ms.to_string());
-    run_with_timeout(cmd, tmp, Duration::from_secs(30))
+    run_with_timeout(cmd, vec![tmp], home, Duration::from_secs(30))
 }
 
 /// Drive the TUI headless until its daemon-mode auto-connect reaches "ready" or times out (printing
 /// `DAEMON_APP_READY ok|timeout`), then dump one frame. Same hard-assert contract as the GUI.
 pub fn run_tui_wait_ready(bin: &std::path::Path, socket: &std::path::Path, dims: (u16, u16), timeout_ms: u32) -> Result<ClientRun> {
-    let (mut cmd, tmp) = isolated_client_command(bin, socket)?;
+    let (mut cmd, tmp, home) = isolated_client_command(bin, socket)?;
     cmd.env("DAEMON_TUI_OFFSCREEN", format!("{}x{}", dims.0, dims.1))
         .env("DAEMON_APP_WAIT_READY", timeout_ms.to_string());
-    run_with_timeout(cmd, tmp, Duration::from_secs(30))
+    run_with_timeout(cmd, vec![tmp], home, Duration::from_secs(30))
 }
 
 /// Drive the TUI (`daemon-tui`) in its offscreen frame-dump harness against `socket`: feed an
@@ -456,7 +494,7 @@ pub fn run_tui_offscreen(
     keys: Option<&str>,
     typ: Option<&str>,
 ) -> Result<ClientRun> {
-    let (mut cmd, tmp) = isolated_client_command(bin, socket)?;
+    let (mut cmd, tmp, home) = isolated_client_command(bin, socket)?;
     cmd.env("DAEMON_TUI_OFFSCREEN", format!("{}x{}", dims.0, dims.1));
     if let Some(keys) = keys {
         cmd.env("DAEMON_TUI_KEYS", keys);
@@ -464,5 +502,64 @@ pub fn run_tui_offscreen(
     if let Some(typ) = typ {
         cmd.env("DAEMON_TUI_TYPE", typ);
     }
-    run_with_timeout(cmd, tmp, Duration::from_secs(30))
+    run_with_timeout(cmd, vec![tmp], home, Duration::from_secs(30))
+}
+
+/// Create a short-pathed temp dir + socket path for a client-spawned daemon (must fit sun_path).
+fn spawn_socket_dir() -> Result<(TempDir, PathBuf)> {
+    let dir = tempfile::Builder::new()
+        .prefix("dsts-")
+        .tempdir_in("/tmp")
+        .context("creating spawn socket temp root")?;
+    let socket = dir.path().join("d.sock");
+    Ok((dir, socket))
+}
+
+/// First-run, managed-spawn (CON-1b): no daemon is pre-started. Run the GUI fresh (setupComplete
+/// false), point DAEMON_BIN at the host binary, and drive the onboarding "Local" connect headlessly
+/// (wait-ready). The client must discover + spawn a daemon, reach a healthy `Health` (sentinel
+/// `DAEMON_APP_READY ok`), and persist setupComplete. The spawned daemon stops on exit (no leak).
+pub fn run_gui_first_run_spawns_daemon(
+    gui: &std::path::Path,
+    daemon_bin: &std::path::Path,
+    timeout_ms: u32,
+) -> Result<ClientRun> {
+    let (sock_tmp, socket) = spawn_socket_dir()?;
+    let (mut cmd, tmp, home) = isolated_client_command_with_conf(gui, &socket, CONF_FRESH_MANAGED)?;
+    cmd.env("QT_QPA_PLATFORM", "offscreen")
+        .env("DAEMON_APP_WAIT_READY", timeout_ms.to_string())
+        .env("DAEMON_BIN", daemon_bin);
+    run_with_timeout(cmd, vec![tmp, sock_tmp], home, Duration::from_secs(30))
+}
+
+/// First-run, managed-spawn for the TUI. Same contract as the GUI variant.
+pub fn run_tui_first_run_spawns_daemon(
+    tui: &std::path::Path,
+    daemon_bin: &std::path::Path,
+    dims: (u16, u16),
+    timeout_ms: u32,
+) -> Result<ClientRun> {
+    let (sock_tmp, socket) = spawn_socket_dir()?;
+    let (mut cmd, tmp, home) = isolated_client_command_with_conf(tui, &socket, CONF_FRESH_MANAGED)?;
+    cmd.env("DAEMON_TUI_OFFSCREEN", format!("{}x{}", dims.0, dims.1))
+        .env("DAEMON_APP_WAIT_READY", timeout_ms.to_string())
+        .env("DAEMON_BIN", daemon_bin);
+    run_with_timeout(cmd, vec![tmp, sock_tmp], home, Duration::from_secs(30))
+}
+
+/// First-run, attach (probe-first): a daemon is ALREADY listening on `socket` (the caller pre-starts
+/// one, typically behind a RecordingProxy). The client runs fresh with managed local daemon ON but
+/// must reuse the running daemon rather than spawn a second. `DAEMON_BIN` is removed from the child
+/// env and no binary is on PATH, so any (incorrect) spawn attempt would fail discovery and leave the
+/// client offline - making a passing ready+Health assertion proof that probe-first attached.
+pub fn run_gui_first_run_attaches(
+    gui: &std::path::Path,
+    socket: &std::path::Path,
+    timeout_ms: u32,
+) -> Result<ClientRun> {
+    let (mut cmd, tmp, home) = isolated_client_command_with_conf(gui, socket, CONF_FRESH_MANAGED)?;
+    cmd.env("QT_QPA_PLATFORM", "offscreen")
+        .env("DAEMON_APP_WAIT_READY", timeout_ms.to_string())
+        .env_remove("DAEMON_BIN");
+    run_with_timeout(cmd, vec![tmp], home, Duration::from_secs(30))
 }

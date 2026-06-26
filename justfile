@@ -26,6 +26,12 @@ build-tui:
 # Build everything the E2E suite needs.
 build-all: build-node build-app build-tui
 
+# Build the client bundles that co-package the daemon host binary (so first-run "Local" can spawn a
+# local daemon without a separate install - user story CON-1b). Submodule-aware, like the codec.
+bundle:
+    nix build ".?submodules=1#bundled-app" --out-link result-bundled-app
+    nix build ".?submodules=1#bundled-tui" --out-link result-bundled-tui
+
 # --- codec contract -------------------------------------------------------
 
 # Prove the generated C codec round-trips real ciborium fixtures (daemon-node).
