@@ -693,6 +693,42 @@ pub fn parse_chat_answer(stdout: &str) -> Option<String> {
         .find_map(|l| l.strip_prefix("DAEMON_APP_ANSWER ").map(|s| s.to_string()))
 }
 
+/// Drive the GUI's headless model-track probe (Phase 2): exercise ModelCatalog / ModelDownloads /
+/// ModelSearch / ModelFiles / ModelDownload through the real ModelRepository against a pre-started
+/// daemon, printing `DAEMON_APP_MODELS catalog=.. downloads=.. search=.. files=.. download=..`
+/// (each ok|err|timeout). Asserts (via the proxy) the model frames cross + (via stdout) the client
+/// decoded a structured response for each. `DAEMON_BIN` removed so it attaches.
+pub fn run_gui_models(
+    gui: &std::path::Path,
+    socket: &std::path::Path,
+    query: &str,
+    repo: &str,
+    timeout_ms: u32,
+) -> Result<ClientRun> {
+    let (mut cmd, tmp, home) = isolated_client_command_with_conf(gui, socket, CONF_FRESH_MANAGED)?;
+    cmd.env("QT_QPA_PLATFORM", "offscreen")
+        .env("DAEMON_APP_WAIT_READY", timeout_ms.to_string())
+        .env("DAEMON_APP_MODELS_PROBE", query)
+        .env("DAEMON_APP_MODELS_REPO", repo)
+        .env_remove("DAEMON_BIN");
+    run_with_timeout(cmd, vec![tmp], home, Duration::from_secs(60))
+}
+
+/// Parse the `DAEMON_APP_MODELS <summary>` line into (key -> outcome) pairs, e.g.
+/// {"catalog":"ok", "search":"err", ...}. Empty if the line is absent.
+pub fn parse_models_summary(stdout: &str) -> std::collections::HashMap<String, String> {
+    stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("DAEMON_APP_MODELS "))
+        .map(|s| {
+            s.split_whitespace()
+                .filter_map(|kv| kv.split_once('='))
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// One framed `ApiRequest` -> `ApiResponse` round-trip over `socket` (length-prefixed CBOR, the same
 /// frame shape the client + proxy use). Each call is its own short-lived connection; session state
 /// lives in the daemon, so submit-then-poll across two calls is fine.
