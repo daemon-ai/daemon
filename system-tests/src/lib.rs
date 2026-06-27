@@ -669,6 +669,67 @@ pub fn run_gui_chat_as_profile(
     run_with_timeout(cmd, vec![tmp], home, Duration::from_secs(60))
 }
 
+/// Drive the GUI's headless HITL hook (CHA-4 / CHA-5): connect, run one turn that parks on a host
+/// gate (the daemon's scripted provider tool call), and auto-resolve it per `decision`
+/// ("approve"|"deny"|"choice"|"input:<text>"). Prints `DAEMON_APP_ANSWER <text>`. Asserts (via the
+/// proxy) that Submit + Respond cross. Attaches to the pre-started daemon.
+pub fn run_gui_hitl(
+    gui: &std::path::Path,
+    socket: &std::path::Path,
+    prompt: &str,
+    decision: &str,
+    timeout_ms: u32,
+) -> Result<ClientRun> {
+    let (mut cmd, tmp, home) = isolated_client_command_with_conf(gui, socket, CONF_FRESH_MANAGED)?;
+    cmd.env("QT_QPA_PLATFORM", "offscreen")
+        .env("DAEMON_APP_WAIT_READY", timeout_ms.to_string())
+        .env("DAEMON_APP_HITL_PROMPT", prompt)
+        .env("DAEMON_APP_HITL_DECISION", decision)
+        .env_remove("DAEMON_BIN");
+    run_with_timeout(cmd, vec![tmp], home, Duration::from_secs(90))
+}
+
+/// Drive the GUI's headless slash-command hook (CHA-7): connect, CommandList, and (when `invoke` is
+/// non-empty) CommandInvoke. Prints `DAEMON_APP_COMMANDS <names-or-output>`.
+pub fn run_gui_command_list(
+    gui: &std::path::Path,
+    socket: &std::path::Path,
+    invoke: &str,
+    timeout_ms: u32,
+) -> Result<ClientRun> {
+    let (mut cmd, tmp, home) = isolated_client_command_with_conf(gui, socket, CONF_FRESH_MANAGED)?;
+    cmd.env("QT_QPA_PLATFORM", "offscreen")
+        .env("DAEMON_APP_WAIT_READY", timeout_ms.to_string())
+        .env("DAEMON_APP_COMMAND_LIST", "1")
+        .env("DAEMON_APP_COMMAND_INVOKE", invoke)
+        .env_remove("DAEMON_BIN");
+    run_with_timeout(cmd, vec![tmp], home, Duration::from_secs(60))
+}
+
+/// Drive the GUI's headless session-search hook (CHA-8): connect, SessionSearch `query`. Prints
+/// `DAEMON_APP_SEARCH <hit-session-ids>`.
+pub fn run_gui_search(
+    gui: &std::path::Path,
+    socket: &std::path::Path,
+    query: &str,
+    timeout_ms: u32,
+) -> Result<ClientRun> {
+    let (mut cmd, tmp, home) = isolated_client_command_with_conf(gui, socket, CONF_FRESH_MANAGED)?;
+    cmd.env("QT_QPA_PLATFORM", "offscreen")
+        .env("DAEMON_APP_WAIT_READY", timeout_ms.to_string())
+        .env("DAEMON_APP_SESSION_SEARCH", query)
+        .env_remove("DAEMON_BIN");
+    run_with_timeout(cmd, vec![tmp], home, Duration::from_secs(60))
+}
+
+/// Extract a `<prefix> <text>` line a headless run prints (e.g. `DAEMON_APP_COMMANDS ` /
+/// `DAEMON_APP_SEARCH `), or None if absent.
+pub fn parse_prefixed(stdout: &str, prefix: &str) -> Option<String> {
+    stdout
+        .lines()
+        .find_map(|l| l.strip_prefix(prefix).map(|s| s.to_string()))
+}
+
 /// TUI variant of [`run_gui_chat`].
 pub fn run_tui_chat(
     tui: &std::path::Path,
