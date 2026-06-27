@@ -6,7 +6,6 @@
 //! and need no credentials. An opt-in variant drives a real Anthropic turn when a key is available.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use daemon_api::{ApiRequest, ApiResponse};
 use daemon_common::SessionId;

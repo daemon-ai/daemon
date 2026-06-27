@@ -630,6 +630,27 @@ pub fn run_gui_chat(
     run_with_timeout(cmd, vec![tmp], home, Duration::from_secs(60))
 }
 
+/// Drive the GUI's headless profile hook (PRO-2/3): create profile `create_id` via the store
+/// (ProfileCreate) and, when `model`/`prompt` are non-empty, edit it (ProfileUpdate), against a
+/// pre-started daemon. Asserts (via the proxy) that the create/update wire ops cross. Attaches.
+pub fn run_gui_profile(
+    gui: &std::path::Path,
+    socket: &std::path::Path,
+    create_id: &str,
+    model: &str,
+    prompt: &str,
+    timeout_ms: u32,
+) -> Result<ClientRun> {
+    let (mut cmd, tmp, home) = isolated_client_command_with_conf(gui, socket, CONF_FRESH_MANAGED)?;
+    cmd.env("QT_QPA_PLATFORM", "offscreen")
+        .env("DAEMON_APP_WAIT_READY", timeout_ms.to_string())
+        .env("DAEMON_APP_PROFILE_CREATE", create_id)
+        .env("DAEMON_APP_PROFILE_MODEL", model)
+        .env("DAEMON_APP_PROFILE_PROMPT", prompt)
+        .env_remove("DAEMON_BIN");
+    run_with_timeout(cmd, vec![tmp], home, Duration::from_secs(45))
+}
+
 /// As [`run_gui_chat`] but binds the turn to a specific profile (PRO-5): the client sends
 /// `Submit{ profile: Some(<profile>) }`, so the new session runs under that agent.
 pub fn run_gui_chat_as_profile(
