@@ -11,3 +11,4 @@ target/
 
 /user-stories/
 *.code-workspace
+.env

@@ -38,6 +38,12 @@ bundle:
 verify-codec:
     cd daemon-node && nix build ".#checks.{{system}}.verify-codec" -L
 
+# Prove the Rust serde wire format matches the authoritative daemon-api.cddl: representative fixtures
+# (+ negative cases) via cddl-cat, then arbitrary values across every variant via proptest.
+conformance:
+    cd daemon-node && nix develop --command cargo test -p daemon-api --test conformance
+    cd daemon-node && nix develop --command cargo test -p daemon-api --features arbitrary --test conformance_proptest
+
 # Fail if daemon-app's vendored codec drifts from the daemon-node contract.
 codec-drift:
     nix build ".?submodules=1#checks.{{system}}.codec-drift" -L

@@ -67,9 +67,9 @@
           mainProgram = "daemon-tui";
         };
 
-        # Where the canonical codegen script + client-view CDDL live in the daemon-node submodule.
+        # Where the canonical codegen script + the single authoritative CDDL live in daemon-node.
         codegenScript = ./daemon-node/crates/contracts/daemon-api/zcbor-codegen.sh;
-        clientCddl = ./daemon-node/crates/contracts/daemon-api/daemon-api-client.cddl;
+        apiCddl = ./daemon-node/crates/contracts/daemon-api/daemon-api.cddl;
         # The checked-in copies daemon-app compiles (no Python/zcbor in the Qt build): the generated
         # codec, and the zcbor C runtime copied alongside it.
         vendoredCodec = ./daemon-app/src/core/daemon/codec/generated;
@@ -105,7 +105,7 @@
           }
           ''
             mkdir -p "$out"
-            bash ${codegenScript} ${clientCddl} "$out" --copy-sources
+            bash ${codegenScript} ${apiCddl} "$out" --copy-sources
           '';
       in
       {
