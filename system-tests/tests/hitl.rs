@@ -3,16 +3,18 @@
 //!
 //! The HITL turn is made hermetic by launching the daemon with the binary-internal scripted
 //! provider (`DAEMON_MODEL_PROVIDER=scripted` + `DAEMON_MOCK_SCRIPT`): the scripted `fs` write,
-//! under the node's default `Ask` approval policy, parks an approval the client must answer. No
-//! network or credentials. The client drives one real turn, auto-answers the parked gate, and the
-//! turn completes - proving the park -> Respond -> resume loop crosses the socket.
+//! under the node's default `Ask` approval policy, parks an in-stream approval the client answers
+//! over the wire with `Respond`. No network or credentials. The client drives one real turn,
+//! auto-answers the parked gate, and the turn completes - proving the park -> Respond -> resume
+//! loop crosses the socket. (Server-side, the surfacing + resume is proven hermetically by
+//! daemon-node's `node_interface::live_approval_park_then_respond` conformance test.)
 
 use std::path::PathBuf;
 
 use daemon_api::ApiRequest;
 use daemon_system_tests::{
-    parse_chat_answer, parse_prefixed, run_gui_chat, run_gui_command_list, run_gui_search, Bins,
-    Daemon, RecordingProxy,
+    parse_chat_answer, parse_prefixed, run_gui_chat, run_gui_command_list, run_gui_hitl,
+    run_gui_search, Bins, Daemon, RecordingProxy,
 };
 
 fn daemon_bin() -> Option<PathBuf> {
@@ -42,44 +44,75 @@ fn frames_contain(proxy: &RecordingProxy, pred: impl Fn(&ApiRequest) -> bool) ->
     proxy.requests().iter().any(pred)
 }
 
-/// CHA-4 (hermetic, the core safety property): the scripted provider issues a side-effecting `fs`
-/// write, which under the node's default `Ask` policy is GATED - the agent must NOT execute it
-/// without approval. We drive the turn and assert it does NOT stream the post-tool completion
-/// ("file written after approval") within the window: the gate held, so a tool-using agent is safe
-/// by default. (Resolving the gate to completion over the socket needs the daemon's parked-approval
-/// to surface to the attached client - an ApprovalsPending/ParkingHandler daemon-node follow-up;
-/// the client-side codec/engine/inbox/UI for that resolution are built + unit/offscreen-covered,
-/// and the inbox query op is proven to cross in `approvals_inbox_query_crosses`.)
+/// CHA-4 (hermetic): the scripted provider issues a side-effecting `fs` write, gated under the
+/// default `Ask` policy. The client sees the in-stream Approval HostRequest on its Subscribe stream,
+/// approves it over the wire (`Respond{Approved(true)}`), and the turn resumes and completes. Assert
+/// that Submit AND Respond crossed the socket and that the post-approval final text streamed.
 #[test]
-fn scripted_gated_tool_is_held_pending_approval() {
+fn chat_approval_park_then_approve() {
     let Some(gui) = gui_bin() else {
-        eprintln!("skipping scripted_gated_tool_is_held_pending_approval: CLIENT_GUI_BIN unset");
+        eprintln!("skipping chat_approval_park_then_approve: CLIENT_GUI_BIN unset");
         return;
     };
     if daemon_bin().is_none() {
-        eprintln!("skipping scripted_gated_tool_is_held_pending_approval: DAEMON_BIN unset");
+        eprintln!("skipping chat_approval_park_then_approve: DAEMON_BIN unset");
         return;
     }
     let Some(daemon) = scripted_daemon(APPROVAL_SCRIPT) else {
-        eprintln!("skipping scripted_gated_tool_is_held_pending_approval: daemon did not start");
+        eprintln!("skipping chat_approval_park_then_approve: daemon did not start");
         return;
     };
     let proxy = RecordingProxy::start(daemon.socket.clone()).expect("proxy starts");
 
-    // No approval is given (headless run), so the gated write must not run to completion.
-    let run =
-        run_gui_chat(&gui, &proxy.socket, "Write the note.", 12000).expect("gui runs");
+    let run = run_gui_hitl(&gui, &proxy.socket, "Write the note.", "approve", 60000)
+        .expect("gui runs");
 
     assert!(
         frames_contain(&proxy, |r| matches!(r, ApiRequest::Submit { .. })),
         "expected a Submit{{StartTurn}} to cross; frames: {:?}",
         proxy.requests()
     );
+    assert!(
+        frames_contain(&proxy, |r| matches!(r, ApiRequest::Respond { .. })),
+        "expected the client to answer the parked approval with a Respond; frames: {:?}\ndaemon log:\n{}",
+        proxy.requests(),
+        daemon.log_contents()
+    );
     let answer = parse_chat_answer(&run.stdout).unwrap_or_default();
     assert!(
-        !answer.contains("file written after approval"),
-        "the §12 approval gate did NOT hold: the gated fs-write completed without approval.\nstdout:\n{}\ndaemon log:\n{}",
+        answer.contains("file written after approval"),
+        "expected the turn to resume + complete after approval.\nstdout:\n{}\nstderr:\n{}\ndaemon log:\n{}",
         run.stdout,
+        run.stderr,
+        daemon.log_contents()
+    );
+}
+
+/// CHA-4 (hermetic): denying the parked approval still answers over the wire (Respond{Approved
+/// (false)}) and settles the turn - the deny path never strands the session, and the gated write
+/// does not run.
+#[test]
+fn chat_approval_park_then_deny() {
+    let Some(gui) = gui_bin() else {
+        eprintln!("skipping chat_approval_park_then_deny: CLIENT_GUI_BIN unset");
+        return;
+    };
+    if daemon_bin().is_none() {
+        eprintln!("skipping chat_approval_park_then_deny: DAEMON_BIN unset");
+        return;
+    }
+    let Some(daemon) = scripted_daemon(APPROVAL_SCRIPT) else {
+        eprintln!("skipping chat_approval_park_then_deny: daemon did not start");
+        return;
+    };
+    let proxy = RecordingProxy::start(daemon.socket.clone()).expect("proxy starts");
+
+    let _run =
+        run_gui_hitl(&gui, &proxy.socket, "Write the note.", "deny", 60000).expect("gui runs");
+    assert!(
+        frames_contain(&proxy, |r| matches!(r, ApiRequest::Respond { .. })),
+        "expected a Respond (deny) to cross; frames: {:?}\ndaemon log:\n{}",
+        proxy.requests(),
         daemon.log_contents()
     );
 }
