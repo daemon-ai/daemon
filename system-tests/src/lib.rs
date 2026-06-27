@@ -612,6 +612,66 @@ pub fn run_tui_onboard(
     run_with_timeout(cmd, vec![tmp], home, Duration::from_secs(45))
 }
 
+/// Drive the GUI through one real headless turn (CHA-1 / CHA-2): connect to `socket` (a pre-started
+/// daemon, typically behind a RecordingProxy), Submit{StartTurn} + Subscribe the stream, and print
+/// `DAEMON_APP_ANSWER <text>`. Asserts (at the proxy) that Submit + Subscribe crossed and (via
+/// stdout) that the client assembled streamed assistant text. `DAEMON_BIN` is removed so it attaches.
+pub fn run_gui_chat(
+    gui: &std::path::Path,
+    socket: &std::path::Path,
+    prompt: &str,
+    timeout_ms: u32,
+) -> Result<ClientRun> {
+    let (mut cmd, tmp, home) = isolated_client_command_with_conf(gui, socket, CONF_FRESH_MANAGED)?;
+    cmd.env("QT_QPA_PLATFORM", "offscreen")
+        .env("DAEMON_APP_WAIT_READY", timeout_ms.to_string())
+        .env("DAEMON_APP_CHAT_PROMPT", prompt)
+        .env_remove("DAEMON_BIN");
+    run_with_timeout(cmd, vec![tmp], home, Duration::from_secs(60))
+}
+
+/// As [`run_gui_chat`] but binds the turn to a specific profile (PRO-5): the client sends
+/// `Submit{ profile: Some(<profile>) }`, so the new session runs under that agent.
+pub fn run_gui_chat_as_profile(
+    gui: &std::path::Path,
+    socket: &std::path::Path,
+    prompt: &str,
+    profile: &str,
+    timeout_ms: u32,
+) -> Result<ClientRun> {
+    let (mut cmd, tmp, home) = isolated_client_command_with_conf(gui, socket, CONF_FRESH_MANAGED)?;
+    cmd.env("QT_QPA_PLATFORM", "offscreen")
+        .env("DAEMON_APP_WAIT_READY", timeout_ms.to_string())
+        .env("DAEMON_APP_CHAT_PROMPT", prompt)
+        .env("DAEMON_APP_CHAT_PROFILE", profile)
+        .env_remove("DAEMON_BIN");
+    run_with_timeout(cmd, vec![tmp], home, Duration::from_secs(60))
+}
+
+/// TUI variant of [`run_gui_chat`].
+pub fn run_tui_chat(
+    tui: &std::path::Path,
+    socket: &std::path::Path,
+    prompt: &str,
+    dims: (u16, u16),
+    timeout_ms: u32,
+) -> Result<ClientRun> {
+    let (mut cmd, tmp, home) = isolated_client_command_with_conf(tui, socket, CONF_FRESH_MANAGED)?;
+    cmd.env("DAEMON_TUI_OFFSCREEN", format!("{}x{}", dims.0, dims.1))
+        .env("DAEMON_APP_WAIT_READY", timeout_ms.to_string())
+        .env("DAEMON_APP_CHAT_PROMPT", prompt)
+        .env_remove("DAEMON_BIN");
+    run_with_timeout(cmd, vec![tmp], home, Duration::from_secs(60))
+}
+
+/// Extract the `DAEMON_APP_ANSWER <text>` line a headless chat run prints (the assembled assistant
+/// text), or None if absent.
+pub fn parse_chat_answer(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("DAEMON_APP_ANSWER ").map(|s| s.to_string()))
+}
+
 /// One framed `ApiRequest` -> `ApiResponse` round-trip over `socket` (length-prefixed CBOR, the same
 /// frame shape the client + proxy use). Each call is its own short-lived connection; session state
 /// lives in the daemon, so submit-then-poll across two calls is fine.
@@ -650,7 +710,20 @@ pub fn run_turn(
     text: &str,
     timeout: Duration,
 ) -> Result<TurnResult> {
-    use daemon_common::{ReqId, SessionId};
+    run_turn_as_profile(socket, session, text, None, timeout)
+}
+
+/// As [`run_turn`] but binds the turn to `profile` (PRO-6 credential isolation): the engine acquires
+/// the credential for that profile, so a turn under a profile with no stored key fails ("no
+/// provider", CON-8).
+pub fn run_turn_as_profile(
+    socket: &std::path::Path,
+    session: &str,
+    text: &str,
+    profile: Option<&str>,
+    timeout: Duration,
+) -> Result<TurnResult> {
+    use daemon_common::{ProfileRef, ReqId, SessionId};
     use daemon_protocol::{AgentCommand, AgentEvent, EndReason, Outbound, UserMsg};
 
     let submit = ApiRequest::Submit {
@@ -660,7 +733,7 @@ pub fn run_turn(
             request_id: ReqId(1),
         },
         origin: None,
-        profile: None,
+        profile: profile.map(ProfileRef::new),
     };
     match api_call(socket, &submit)? {
         ApiResponse::Ok => {}

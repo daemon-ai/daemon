@@ -38,6 +38,11 @@
         # Wrap a client so it ships with the daemon host binary: set DAEMON_BIN by default (the
         # LocalDaemonLauncher's first env-based discovery step) so a packaged install can spawn a
         # local daemon out of the box, while a user/operator override of DAEMON_BIN still wins.
+        #
+        # The bundle is the real product, so it also defaults to ServiceMode::Daemon (real
+        # connection + sessions + accounts + models + profiles + chat over the node). Bare dev
+        # builds and the test harnesses keep the Mock default unless they opt in explicitly, so
+        # in-repo offscreen-render / unit coverage is unaffected. A user override still wins.
         bundleWithDaemon =
           { app, name, mainProgram }:
           pkgs.symlinkJoin {
@@ -48,7 +53,8 @@
               for client in daemon-app daemon-tui; do
                 if [ -e "$out/bin/$client" ]; then
                   wrapProgram "$out/bin/$client" \
-                    --set-default DAEMON_BIN "${daemonBin}/bin/daemon"
+                    --set-default DAEMON_BIN "${daemonBin}/bin/daemon" \
+                    --set-default DAEMON_APP_SERVICE_MODE "daemon"
                 fi
               done
             '';
