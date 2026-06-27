@@ -23,7 +23,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
-use daemon_api::{from_cbor, ApiRequest, ApiResponse};
+use daemon_api::{from_cbor, to_cbor, ApiRequest, ApiResponse};
 use tempfile::TempDir;
 
 /// Binary paths injected by the build/CI layer.
@@ -70,6 +70,13 @@ impl Daemon {
     }
 
     pub fn start_with(bins: &Bins) -> Result<Daemon> {
+        Self::start_with_env(bins, &[])
+    }
+
+    /// As [`Daemon::start_with`], but with extra environment for the daemon process. Used by the
+    /// opt-in inference e2e to select a real cloud provider (e.g. `DAEMON_MODEL_PROVIDER=genai`,
+    /// `DAEMON_MODEL=<id>`, `ANTHROPIC_API_KEY=<key>`).
+    pub fn start_with_env(bins: &Bins, extra_env: &[(&str, String)]) -> Result<Daemon> {
         // Keep the root short: a filesystem Unix socket path must fit in sun_path (108 bytes).
         let tmp = tempfile::Builder::new()
             .prefix("dst-")
@@ -97,6 +104,9 @@ impl Daemon {
             .stdin(Stdio::null())
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(log_err));
+        for (k, v) in extra_env {
+            cmd.env(k, v);
+        }
         // Own session/process group so teardown can reap any workers the daemon spawns.
         unsafe {
             cmd.pre_exec(|| {
@@ -562,4 +572,135 @@ pub fn run_gui_first_run_attaches(
         .env("DAEMON_APP_WAIT_READY", timeout_ms.to_string())
         .env_remove("DAEMON_BIN");
     run_with_timeout(cmd, vec![tmp], home, Duration::from_secs(30))
+}
+
+/// Drive the GUI through the full headless first-run onboarding (CON-4/6/7): connect to `socket`
+/// (a pre-started daemon, typically behind a RecordingProxy), add the provider `key`, pick the first
+/// discovered model, and finish. Asserts via the proxy that the credential/model wire ops crossed,
+/// and via the persisted config that setup completed. `DAEMON_BIN` is removed so it attaches.
+pub fn run_gui_onboard(
+    gui: &std::path::Path,
+    socket: &std::path::Path,
+    provider: &str,
+    key: &str,
+    timeout_ms: u32,
+) -> Result<ClientRun> {
+    let (mut cmd, tmp, home) = isolated_client_command_with_conf(gui, socket, CONF_FRESH_MANAGED)?;
+    cmd.env("QT_QPA_PLATFORM", "offscreen")
+        .env("DAEMON_APP_WAIT_READY", timeout_ms.to_string())
+        .env("DAEMON_APP_ONBOARD_KEY", key)
+        .env("DAEMON_APP_ONBOARD_PROVIDER", provider)
+        .env_remove("DAEMON_BIN");
+    run_with_timeout(cmd, vec![tmp], home, Duration::from_secs(45))
+}
+
+/// TUI variant of [`run_gui_onboard`].
+pub fn run_tui_onboard(
+    tui: &std::path::Path,
+    socket: &std::path::Path,
+    provider: &str,
+    key: &str,
+    dims: (u16, u16),
+    timeout_ms: u32,
+) -> Result<ClientRun> {
+    let (mut cmd, tmp, home) = isolated_client_command_with_conf(tui, socket, CONF_FRESH_MANAGED)?;
+    cmd.env("DAEMON_TUI_OFFSCREEN", format!("{}x{}", dims.0, dims.1))
+        .env("DAEMON_APP_WAIT_READY", timeout_ms.to_string())
+        .env("DAEMON_APP_ONBOARD_KEY", key)
+        .env("DAEMON_APP_ONBOARD_PROVIDER", provider)
+        .env_remove("DAEMON_BIN");
+    run_with_timeout(cmd, vec![tmp], home, Duration::from_secs(45))
+}
+
+/// One framed `ApiRequest` -> `ApiResponse` round-trip over `socket` (length-prefixed CBOR, the same
+/// frame shape the client + proxy use). Each call is its own short-lived connection; session state
+/// lives in the daemon, so submit-then-poll across two calls is fine.
+pub fn api_call(socket: &std::path::Path, request: &ApiRequest) -> Result<ApiResponse> {
+    let mut stream = UnixStream::connect(socket)
+        .with_context(|| format!("connecting api socket {}", socket.display()))?;
+    let payload = to_cbor(request);
+    stream.write_all(&(payload.len() as u32).to_be_bytes())?;
+    stream.write_all(&payload)?;
+    stream.flush()?;
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf)?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    let mut buf = vec![0u8; len];
+    stream.read_exact(&mut buf)?;
+    from_cbor::<ApiResponse>(&buf).map_err(|e| anyhow!("decoding ApiResponse: {e}"))
+}
+
+/// The outcome of driving one real agent turn (the opt-in inference e2e).
+#[derive(Debug, Default)]
+pub struct TurnResult {
+    /// True iff the turn ended with `EndReason::Completed` (a real, non-error answer).
+    pub completed: bool,
+    /// The aggregated assistant text (final summary text, or accumulated deltas).
+    pub final_text: String,
+    /// A turn-level error string, if the engine emitted `AgentEvent::Error`.
+    pub error: Option<String>,
+}
+
+/// Drive one real turn over `socket`: `Submit { StartTurn }` then `Poll` until `TurnFinished`
+/// (or `timeout`). Returns whether it completed + the final text. Proves a credential actually
+/// provisions inference end-to-end (used by the opt-in Anthropic e2e).
+pub fn run_turn(
+    socket: &std::path::Path,
+    session: &str,
+    text: &str,
+    timeout: Duration,
+) -> Result<TurnResult> {
+    use daemon_common::{ReqId, SessionId};
+    use daemon_protocol::{AgentCommand, AgentEvent, EndReason, Outbound, UserMsg};
+
+    let submit = ApiRequest::Submit {
+        session: SessionId::new(session),
+        command: AgentCommand::StartTurn {
+            input: UserMsg::new(text),
+            request_id: ReqId(1),
+        },
+        origin: None,
+        profile: None,
+    };
+    match api_call(socket, &submit)? {
+        ApiResponse::Ok => {}
+        ApiResponse::Error(e) => bail!("Submit returned an error: {e:?}"),
+        other => bail!("Submit returned unexpected response: {other:?}"),
+    }
+
+    let mut result = TurnResult::default();
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let drained = match api_call(
+            socket,
+            &ApiRequest::Poll {
+                session: SessionId::new(session),
+                max: 0,
+            },
+        )? {
+            ApiResponse::Drained(items) => items,
+            ApiResponse::Error(e) => bail!("Poll returned an error: {e:?}"),
+            other => bail!("Poll returned unexpected response: {other:?}"),
+        };
+        for item in drained {
+            if let Outbound::Event(event) = item {
+                match event {
+                    AgentEvent::TextDelta { text, .. } => result.final_text.push_str(&text),
+                    AgentEvent::Error { failure, .. } => result.error = Some(failure),
+                    AgentEvent::TurnFinished { summary, .. } => {
+                        result.completed = matches!(summary.end_reason, EndReason::Completed);
+                        if let Some(t) = summary.final_text {
+                            if !t.is_empty() {
+                                result.final_text = t;
+                            }
+                        }
+                        return Ok(result);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    Ok(result)
 }

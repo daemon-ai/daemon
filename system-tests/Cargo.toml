@@ -13,6 +13,9 @@ path = "src/lib.rs"
 # inheritance against daemon-node/Cargo.toml, so the harness decodes frames with the daemon's own
 # CBOR types - no second codec, no drift.
 daemon-api = { path = "../daemon-node/crates/contracts/daemon-api" }
+# For driving a real turn (Submit/Poll) in the opt-in inference e2e: the §17 command + event types.
+daemon-protocol = { path = "../daemon-node/crates/contracts/daemon-protocol" }
+daemon-common = { path = "../daemon-node/crates/contracts/daemon-common" }
 anyhow = "1"
 tempfile = "3"
 libc = "0.2"
