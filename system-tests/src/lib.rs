@@ -800,6 +800,39 @@ pub fn run_gui_models(
     run_with_timeout(cmd, vec![tmp], home, Duration::from_secs(60))
 }
 
+/// Drive the GUI's headless filesystem probe (Phase 4 fs seam): connect, then exercise the
+/// daemon-backed IFsService over the wire (listRoots -> open -> write a probe file -> read it back)
+/// against a pre-started daemon, printing `DAEMON_APP_FS roots=.. root=.. list=.. write=ok read=ok`.
+/// Asserts (via the proxy) the Fs frames cross + (via stdout) the round-trip succeeded against the
+/// real WorkspaceFs. `DAEMON_BIN` removed so it attaches to the running daemon.
+pub fn run_gui_fs(
+    gui: &std::path::Path,
+    socket: &std::path::Path,
+    timeout_ms: u32,
+) -> Result<ClientRun> {
+    let (mut cmd, tmp, home) = isolated_client_command_with_conf(gui, socket, CONF_FRESH_MANAGED)?;
+    cmd.env("QT_QPA_PLATFORM", "offscreen")
+        .env("DAEMON_APP_WAIT_READY", timeout_ms.to_string())
+        .env("DAEMON_APP_FS_PROBE", "1")
+        .env_remove("DAEMON_BIN");
+    run_with_timeout(cmd, vec![tmp], home, Duration::from_secs(60))
+}
+
+/// Parse the `DAEMON_APP_FS <summary>` line into (key -> value) pairs, e.g.
+/// {"roots":"1", "write":"ok", "read":"ok", ...}. Empty if the line is absent.
+pub fn parse_fs_summary(stdout: &str) -> std::collections::HashMap<String, String> {
+    stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("DAEMON_APP_FS "))
+        .map(|s| {
+            s.split_whitespace()
+                .filter_map(|kv| kv.split_once('='))
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Parse the `DAEMON_APP_MODELS <summary>` line into (key -> outcome) pairs, e.g.
 /// {"catalog":"ok", "search":"err", ...}. Empty if the line is absent.
 pub fn parse_models_summary(stdout: &str) -> std::collections::HashMap<String, String> {
