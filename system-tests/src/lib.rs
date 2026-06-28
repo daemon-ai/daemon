@@ -23,7 +23,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
-use daemon_api::{from_cbor, to_cbor, ApiRequest, ApiResponse};
+use daemon_api::{from_cbor, to_cbor, ApiRequest, ApiResponse, WireC2S, WireS2C};
 use tempfile::TempDir;
 
 /// Binary paths injected by the build/CI layer.
@@ -318,6 +318,31 @@ fn spawn_relays(client: UnixStream, upstream: UnixStream, trace: Arc<Mutex<Vec<F
     });
 }
 
+/// Decode a client->daemon frame into its `ApiRequest`. Multiplexed clients (wire L0) wrap the
+/// request in a `Call`/`Open` envelope; a legacy (bare) frame decodes directly. The envelope tags
+/// are disjoint from the request tags, so trying the envelope first never misclassifies a bare one.
+fn decode_client_request(payload: &[u8]) -> Option<ApiRequest> {
+    if let Ok(frame) = from_cbor::<WireC2S>(payload) {
+        return match frame {
+            WireC2S::Call { req, .. } | WireC2S::Open { req, .. } => Some(req),
+            WireC2S::Hello { .. } | WireC2S::Cancel { .. } => None,
+        };
+    }
+    from_cbor::<ApiRequest>(payload).ok()
+}
+
+/// Decode a daemon->client frame into its `ApiResponse` (unwrapping a `Reply`/`Item` envelope, or a
+/// legacy bare response).
+fn decode_daemon_response(payload: &[u8]) -> Option<ApiResponse> {
+    if let Ok(frame) = from_cbor::<WireS2C>(payload) {
+        return match frame {
+            WireS2C::Reply { res, .. } | WireS2C::Item { res, .. } => Some(res),
+            WireS2C::Hello { .. } | WireS2C::End { .. } | WireS2C::Reset { .. } => None,
+        };
+    }
+    from_cbor::<ApiResponse>(payload).ok()
+}
+
 /// Read length-framed CBOR from `from`, decode + record, and forward verbatim to `to`.
 fn relay(mut from: UnixStream, mut to: UnixStream, from_client: bool, trace: Arc<Mutex<Vec<Frame>>>) {
     loop {
@@ -332,9 +357,9 @@ fn relay(mut from: UnixStream, mut to: UnixStream, from_client: bool, trace: Arc
         }
 
         let (request, response) = if from_client {
-            (from_cbor::<ApiRequest>(&payload).ok(), None)
+            (decode_client_request(&payload), None)
         } else {
-            (None, from_cbor::<ApiResponse>(&payload).ok())
+            (None, decode_daemon_response(&payload))
         };
         trace.lock().unwrap().push(Frame {
             from_client,
