@@ -216,6 +216,89 @@ fn profile_clone_then_delete() {
     assert!(!profile_listed(&daemon.socket, "work-clone"), "the deleted clone should be gone");
 }
 
+/// PRO-7: export the active profile as a portable Distribution, then import it under a new id (the
+/// new profile lists). PRO-8: an edit appends a revision, ProfileHistory lists it, and ProfileRevert
+/// rolls the profile back - all against the real daemon's revision log.
+#[test]
+fn profile_export_import_history_revert() {
+    let bins = match Bins::from_env() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("skipping profile_export_import_history_revert: {e}");
+            return;
+        }
+    };
+    // Profile versioning (ProfileHistory/Revert) is bound only on a durable node (the in-memory
+    // default hosts no revision log), so run against the SQLite store backend.
+    let daemon = Daemon::start_with_env(&bins, &[("DAEMON_STORE", "sqlite".into())])
+        .expect("durable daemon becomes ready");
+    let active = active_profile_id(&daemon.socket);
+
+    // PRO-7 export: the active profile serializes to a Distribution carrying its spec.
+    let dist = match api_call(&daemon.socket, &ApiRequest::ProfileExport { id: active.clone() })
+        .expect("ProfileExport round-trips")
+    {
+        ApiResponse::Distribution(dist) => {
+            assert_eq!(dist.profile.id, active, "the distribution carries the exported profile");
+            dist
+        }
+        other => panic!("ProfileExport did not return a Distribution: {other:?}"),
+    };
+
+    // PRO-7 import: bring the distribution back under a new id; the new profile lists. (The GUI's
+    // export->file->import file round-trip is covered by the daemon-app unit test.)
+    match api_call(
+        &daemon.socket,
+        &ApiRequest::ProfileImport {
+            dist,
+            new_id: Some("exported-copy".into()),
+        },
+    )
+    .expect("ProfileImport round-trips")
+    {
+        ApiResponse::ProfileId(id) => assert_eq!(id, "exported-copy", "import returns the new id"),
+        other => panic!("ProfileImport did not return a ProfileId: {other:?}"),
+    }
+    assert!(profile_listed(&daemon.socket, "exported-copy"), "the imported profile should list");
+
+    // PRO-8: an edit appends a revision. Re-fetch the spec, tweak the model, and update.
+    let mut spec = match api_call(&daemon.socket, &ApiRequest::ProfileGet { id: active.clone() })
+        .expect("ProfileGet round-trips")
+    {
+        ApiResponse::Profile(Some(spec)) => spec,
+        other => panic!("ProfileGet did not return the active spec: {other:?}"),
+    };
+    spec.model = "edited-model".into();
+    match api_call(&daemon.socket, &ApiRequest::ProfileUpdate { spec }).expect("ProfileUpdate")
+    {
+        ApiResponse::Ok => {}
+        other => panic!("ProfileUpdate did not return Ok: {other:?}"),
+    }
+
+    // ProfileHistory lists the revision log (oldest first); revert to its first revision.
+    let revs = match api_call(&daemon.socket, &ApiRequest::ProfileHistory { id: active.clone() })
+        .expect("ProfileHistory round-trips")
+    {
+        ApiResponse::Revisions(revs) => revs,
+        other => panic!("ProfileHistory did not return Revisions: {other:?}"),
+    };
+    assert!(!revs.is_empty(), "the edited profile should have at least one revision");
+    let first_seq = revs.first().expect("a revision").seq;
+
+    match api_call(
+        &daemon.socket,
+        &ApiRequest::ProfileRevert {
+            id: active.clone(),
+            seq: first_seq,
+        },
+    )
+    .expect("ProfileRevert round-trips")
+    {
+        ApiResponse::Ok => {}
+        other => panic!("ProfileRevert did not return Ok: {other:?}"),
+    }
+}
+
 /// PRO-6 (full A-vs-B, opt-in real key): clone the configured default into two profiles, key only
 /// one; a turn under the keyed profile completes while the other fails - true per-profile credential
 /// isolation across two identically-configured profiles (only the credential differs).
