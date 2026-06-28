@@ -818,6 +818,22 @@ pub fn run_gui_fs(
     run_with_timeout(cmd, vec![tmp], home, Duration::from_secs(60))
 }
 
+/// Drive the GUI's headless fleet probe (Phase 5b): connect, refresh the subagent Tree, and issue a
+/// Pause, printing `DAEMON_APP_FLEET units=N`. Asserts (via the proxy) the Tree + Pause frames cross
+/// the socket against the real daemon. `DAEMON_BIN` removed so it attaches to the running daemon.
+pub fn run_gui_fleet(
+    gui: &std::path::Path,
+    socket: &std::path::Path,
+    timeout_ms: u32,
+) -> Result<ClientRun> {
+    let (mut cmd, tmp, home) = isolated_client_command_with_conf(gui, socket, CONF_FRESH_MANAGED)?;
+    cmd.env("QT_QPA_PLATFORM", "offscreen")
+        .env("DAEMON_APP_WAIT_READY", timeout_ms.to_string())
+        .env("DAEMON_APP_FLEET_PROBE", "1")
+        .env_remove("DAEMON_BIN");
+    run_with_timeout(cmd, vec![tmp], home, Duration::from_secs(60))
+}
+
 /// Parse the `DAEMON_APP_FS <summary>` line into (key -> value) pairs, e.g.
 /// {"roots":"1", "write":"ok", "read":"ok", ...}. Empty if the line is absent.
 pub fn parse_fs_summary(stdout: &str) -> std::collections::HashMap<String, String> {
