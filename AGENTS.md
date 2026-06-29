@@ -37,7 +37,6 @@ the CodeScene `cs` CLI + the `cs-mcp` MCP server). The free `default` shell neve
 so a free-only checkout is unaffected. The shell sources the gitignored `.env`
 (`CS_ACCESS_TOKEN`, `GITHUB_TOKEN`) at entry; secrets never land in tracked files.
 
-- `just cursor`              # launch Cursor inside `.#review` (cs / cs-mcp / mrva / codeql on PATH)
 - `just code-health <file>`  # CodeScene Code Health of a file (lint-style)
 - `just cs-projects`         # list CodeScene Cloud projects (find a project id)
 - `just hotspots <id>`       # export ranked hotspots -> codescene-hotspots-<id>.json

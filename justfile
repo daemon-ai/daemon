@@ -282,7 +282,7 @@ hotspots project:
       : "${CS_ACCESS_TOKEN:?set CS_ACCESS_TOKEN in .env}"
       base="${CS_API:-https://api.codescene.io}"
       auth=(-H "Accept: application/json" -H "Authorization: Bearer ${CS_ACCESS_TOKEN}")
-      analysis=$(curl -fsS "${auth[@]}" "$base/v2/projects/{{project}}/analyses" | jq -r "(.[0].id // .analyses[0].id)")
+      analysis=$(curl -fsS "${auth[@]}" "$base/v2/projects/{{project}}/analyses" | jq -r ".analyses[0].id")
       curl -fsS "${auth[@]}" "$base/v2/projects/{{project}}/analyses/$analysis/files?order_by=change_frequency" \
         > "codescene-hotspots-{{project}}.json"
       echo "wrote codescene-hotspots-{{project}}.json (analysis $analysis)"

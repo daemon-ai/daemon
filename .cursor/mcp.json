@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "codescene": {
+      "command": "${workspaceFolder}/scripts/cs-mcp"
+    }
+  }
+}
