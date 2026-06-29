@@ -12,3 +12,8 @@ target/
 /user-stories/
 *.code-workspace
 .env
+
+# Code-review / tech-debt tooling working data (never committed).
+/.cursor/
+/.mrva/
+codescene-hotspots*.json

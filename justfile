@@ -253,3 +253,55 @@ install-hooks:
       ln -sf "$hook" "$repo/$dir/pre-commit"
       echo "installed pre-commit hook -> $repo/$dir/pre-commit"
     done
+
+# --- code review / tech-debt tooling (opt-in `review` shell) --------------
+# CodeScene (cs / cs-mcp) + mrva (+ codeql) live in the unfree-gated `.#review` devShell, which
+# sources .env for CS_ACCESS_TOKEN / GITHUB_TOKEN. None of this is on the free `default` path.
+
+# Launch Cursor inside the review shell so cs / cs-mcp / mrva / codeql + .env tokens are on PATH.
+cursor:
+    nix develop .#review --command cursor .
+
+# Local Code Health of a file, lint-style (CodeScene CLI). Usage: `just code-health daemon-node/crates/node/src/main.rs`.
+code-health file:
+    nix develop .#review --command cs check {{file}}
+
+# Dump CodeScene Cloud projects as JSON (worst hotspot health first) so you can find a project id.
+cs-projects:
+    nix develop .#review --command bash -euo pipefail -c '\
+      : "${CS_ACCESS_TOKEN:?set CS_ACCESS_TOKEN in .env}"; \
+      curl -fsS -H "Accept: application/json" -H "Authorization: Bearer ${CS_ACCESS_TOKEN}" \
+        "${CS_API:-https://api.codescene.io}/v2/projects?order_by=analysis.hotspot_code_health.now" | jq .'
+
+# Export a project's latest hotspot/code-health ranking to codescene-hotspots-<id>.json (agent-readable).
+# Usage: `just hotspots <project-id>` (get the id from `just cs-projects`).
+hotspots project:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    nix develop .#review --command bash -euo pipefail -c '
+      : "${CS_ACCESS_TOKEN:?set CS_ACCESS_TOKEN in .env}"
+      base="${CS_API:-https://api.codescene.io}"
+      auth=(-H "Accept: application/json" -H "Authorization: Bearer ${CS_ACCESS_TOKEN}")
+      analysis=$(curl -fsS "${auth[@]}" "$base/v2/projects/{{project}}/analyses" | jq -r "(.[0].id // .analyses[0].id)")
+      curl -fsS "${auth[@]}" "$base/v2/projects/{{project}}/analyses/$analysis/files?order_by=change_frequency" \
+        > "codescene-hotspots-{{project}}.json"
+      echo "wrote codescene-hotspots-{{project}}.json (analysis $analysis)"
+    '
+
+# Pull the prebuilt CodeQL databases (needs GITHUB_TOKEN in .env). The codeql.yml workflow lives in
+# the superproject and analyzes both submodules via source-root, so GitHub publishes BOTH language
+# databases under daemon-ai/daemon (not the submodule repos). c-cpp only appears once that lane of
+# codeql.yml passes; until then only the rust database is downloaded.
+mrva-pull:
+    nix develop .#review --command bash -euo pipefail -c '\
+      mkdir -p .mrva; \
+      mrva download --language rust .mrva repo --owner daemon-ai --repository daemon; \
+      mrva download --language cpp  .mrva repo --owner daemon-ai --repository daemon \
+        || echo "note: no c-cpp CodeQL database yet (the codeql.yml analyze (c-cpp) lane is failing)"'
+
+# Run a CodeQL query pack across the pulled databases and pretty-print findings.
+# Usage: `just mrva-scan path/to/codeql-queries/rust/src` (clone github.com/trailofbits/codeql-queries).
+mrva-scan queries:
+    nix develop .#review --command bash -euo pipefail -c '\
+      mrva analyze .mrva {{queries}} -- --rerun --threads=0; \
+      mrva pprint .mrva'

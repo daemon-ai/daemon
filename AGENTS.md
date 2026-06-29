@@ -30,6 +30,25 @@ Results are CANDIDATES, not instructions: Qt signals/slots, QML-invoked methods,
 `#[no_mangle]`/FFI exports, and feature-gated code routinely show up as false positives.
 Delete in small, verified batches.
 
+## Code review / tech-debt tooling (opt-in `review` shell)
+
+CodeScene + mrva live in a dedicated, unfree-gated `nix develop .#review` shell (codeql + mrva +
+the CodeScene `cs` CLI + the `cs-mcp` MCP server). The free `default` shell never references them,
+so a free-only checkout is unaffected. The shell sources the gitignored `.env`
+(`CS_ACCESS_TOKEN`, `GITHUB_TOKEN`) at entry; secrets never land in tracked files.
+
+- `just cursor`              # launch Cursor inside `.#review` (cs / cs-mcp / mrva / codeql on PATH)
+- `just code-health <file>`  # CodeScene Code Health of a file (lint-style)
+- `just cs-projects`         # list CodeScene Cloud projects (find a project id)
+- `just hotspots <id>`       # export ranked hotspots -> codescene-hotspots-<id>.json
+- `just mrva-pull`           # download the prebuilt CodeQL DBs (published under daemon-ai/daemon)
+- `just mrva-scan <queries>` # run a CodeQL query pack across them + pretty-print
+
+The CodeScene MCP is wired into Cursor via [.cursor/mcp.json](.cursor/mcp.json) ->
+[scripts/cs-mcp](scripts/cs-mcp); agents should consult it (Code Health / hotspots) before and
+after edits to avoid introducing technical debt. First entry into `.#review` builds the unfree
+`codeql` (a ~1.6 GB GitHub download, not on `cache.nixos.org`); it is cached thereafter.
+
 ## Language specifics
 
 See `daemon-node/AGENTS.md` (Rust) and `daemon-app/AGENTS.md` (C++/QML). Each submodule is its

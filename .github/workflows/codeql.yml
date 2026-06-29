@@ -55,14 +55,23 @@ jobs:
           build-mode: ${{ matrix.build-mode }}
           source-root: ${{ matrix.source-root }}
 
-      # Build the Qt client so CodeQL traces compilation. <DEP>_SOURCE_DIR vars come from the
-      # devShell env (CMake reads them), matching the ci.yml daemon-app build.
+      # Build the Qt client so CodeQL traces compilation. Must `cd daemon-app` first (the
+      # superproject root has no CMakeLists.txt) and pass the <DEP>_SOURCE_DIR vars from the
+      # devShell env, exactly mirroring the ci.yml daemon-app build.
       - if: matrix.build-mode == 'manual'
         name: Build daemon-app (CodeQL trace)
         run: |
-          nix develop ./daemon-app --command bash -c '
+          cd daemon-app
+          nix develop --command bash -c '
             set -e
-            cmake -B build-codeql -G Ninja -DBUILD_TESTING=ON -DDAEMON_APP_TUI=ON
+            # Disable ccache: the runner cache dir is not writable, and (more importantly) a ccache
+            # hit skips the real compiler so CodeQL would trace no compilation - it must see every TU.
+            export CCACHE_DISABLE=1
+            cmake -B build-codeql -G Ninja -DBUILD_TESTING=ON -DDAEMON_APP_TUI=ON \
+              -DMD4QT_SOURCE_DIR="$MD4QT_SOURCE_DIR" -DEARCUT_SOURCE_DIR="$EARCUT_SOURCE_DIR" \
+              -DKSYNTAXHIGHLIGHTING_SOURCE_DIR="$KSYNTAXHIGHLIGHTING_SOURCE_DIR" -DMICROTEX_SOURCE_DIR="$MICROTEX_SOURCE_DIR" \
+              -DQWINDOWKIT_SOURCE_DIR="$QWINDOWKIT_SOURCE_DIR" -DQSIMPLEUPDATER_SOURCE_DIR="$QSIMPLEUPDATER_SOURCE_DIR" \
+              -DQAUTOSTART_SOURCE_DIR="$QAUTOSTART_SOURCE_DIR" -DQXTGLOBALSHORTCUT_SOURCE_DIR="$QXTGLOBALSHORTCUT_SOURCE_DIR"
             cmake --build build-codeql
           '
 

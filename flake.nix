@@ -2,7 +2,7 @@
   description = "daemon superproject: cross-repo codec sync + end-to-end integration";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
 
     # The two children, consumed ONLY by the integration `bundled-*` outputs below (the daemon
@@ -29,6 +29,127 @@
       system:
       let
         pkgs = import nixpkgs { inherit system; };
+        lib = pkgs.lib;
+
+        # --- opt-in code-review / tech-debt tooling (the `review` devShell) ---------------------
+        # Unfree allowance scoped to exactly these names, so the free default / codec / bundle
+        # outputs (which use `pkgs` above) never evaluate an unfree package - a free-only
+        # contributor's `nix develop` / `nix build` / `nix flake check` is never blocked - while the
+        # licence-gated review tooling stays reproducible without any per-dev NIXPKGS_ALLOW_UNFREE.
+        pkgsUnfree = import nixpkgs {
+          inherit system;
+          config.allowUnfreePredicate =
+            p: builtins.elem (lib.getName p) [ "codeql" "codescene-cli" "codescene-mcp" ];
+        };
+
+        # Nix system -> CodeScene / cs-mcp release artifact platform suffix.
+        csPlatforms = {
+          x86_64-linux = "linux-amd64";
+          aarch64-linux = "linux-aarch64";
+          x86_64-darwin = "macos-amd64";
+          aarch64-darwin = "macos-aarch64";
+        };
+        csPlat = csPlatforms.${system} or (throw "review tooling is unsupported on ${system}");
+
+        # CodeScene CLI (`cs`): a GraalVM native image. Only the `-latest` artifact is publicly
+        # fetchable (the versioned URLs are access-gated), so it is pinned by content hash; a
+        # CodeScene release that moves `latest` trips the hash and forces a deliberate refresh
+        # (re-run `nix store prefetch-file` for the four `cs-<plat>-latest.zip` URLs).
+        codescene-cli =
+          let
+            hashes = {
+              linux-amd64 = "sha256-If2dVbp1Y3/lu7Id8eqhCqGse2kOI1uqBW3yX7lgGz0=";
+              linux-aarch64 = "sha256-FejzCpRuykwHstcKnaYgONQB24D+LPxEW99IEreMhzo=";
+              macos-amd64 = "sha256-BOwHqIZvoIa28zzWd0G086dolJjq3SfhqwwdinA6eqQ=";
+              macos-aarch64 = "sha256-xh0xV03Wl7N6YUudMUYC5XtovDJf+/y4AkOYGnM+JXU=";
+            };
+          in
+          pkgsUnfree.stdenv.mkDerivation {
+            pname = "codescene-cli";
+            version = "latest-2026-06-29";
+            src = pkgs.fetchurl {
+              url = "https://downloads.codescene.io/enterprise/cli/cs-${csPlat}-latest.zip";
+              hash = hashes.${csPlat};
+            };
+            nativeBuildInputs = [ pkgs.unzip ] ++ lib.optional pkgs.stdenv.isLinux pkgs.autoPatchelfHook;
+            buildInputs = lib.optionals pkgs.stdenv.isLinux [ pkgs.stdenv.cc.cc.lib pkgs.zlib ];
+            sourceRoot = ".";
+            dontConfigure = true;
+            dontBuild = true;
+            installPhase = ''
+              runHook preInstall
+              install -Dm755 cs "$out/bin/cs"
+              runHook postInstall
+            '';
+            meta = {
+              description = "CodeScene CLI (cs): local Code Health / delta analysis";
+              homepage = "https://codescene.io/docs/cli/index.html";
+              license = lib.licenses.unfree;
+              mainProgram = "cs";
+              platforms = builtins.attrNames csPlatforms;
+            };
+          };
+
+        # CodeScene MCP server (`cs-mcp`, Rust), pinned to a tagged GitHub release. Exposes Code
+        # Health / hotspots / tech-debt to MCP clients (Cursor) via the subscription PAT.
+        codescene-mcp =
+          let
+            version = "1.3.6";
+            hashes = {
+              linux-amd64 = "sha256-R+ntJwZcrb7cFeNZCAsSXmqpdbUuvnHWxgCeZjsqyWA=";
+              linux-aarch64 = "sha256-Zun2LSvsj+gZxB9ovBIgToEF/xToMab/0FxAExsWwsg=";
+              macos-amd64 = "sha256-pcRo0RvcZ1tid27u01l52IXgzZSYPKvkDNCqI6r5/q8=";
+              macos-aarch64 = "sha256-GEEy8KU9dyqvov5ZBCNgORGzHGEa4kGvtj7wZVZ5jiY=";
+            };
+          in
+          pkgsUnfree.stdenv.mkDerivation {
+            pname = "codescene-mcp";
+            inherit version;
+            src = pkgs.fetchurl {
+              url = "https://github.com/codescene-oss/codescene-mcp-server/releases/download/MCP-${version}/cs-mcp-${csPlat}.zip";
+              hash = hashes.${csPlat};
+            };
+            nativeBuildInputs = [ pkgs.unzip ] ++ lib.optional pkgs.stdenv.isLinux pkgs.autoPatchelfHook;
+            buildInputs = lib.optionals pkgs.stdenv.isLinux [ pkgs.stdenv.cc.cc.lib pkgs.openssl pkgs.zlib ];
+            sourceRoot = ".";
+            dontConfigure = true;
+            dontBuild = true;
+            # The zip ships the binary platform-suffixed (e.g. cs-mcp-linux-amd64) next to detached
+            # checksum/signature files; install just the executable as `cs-mcp`.
+            installPhase = ''
+              runHook preInstall
+              install -Dm755 "cs-mcp-${csPlat}" "$out/bin/cs-mcp"
+              runHook postInstall
+            '';
+            meta = {
+              description = "CodeScene MCP server (cs-mcp): Code Health insights for AI assistants";
+              homepage = "https://github.com/codescene-oss/codescene-mcp-server";
+              license = lib.licenses.unfree;
+              mainProgram = "cs-mcp";
+              platforms = builtins.attrNames csPlatforms;
+            };
+          };
+
+        # mrva: terminal-first CodeQL multi-repo variant analysis (free, AGPL-3.0). `mrva analyze`
+        # shells out to the `codeql` CLI, which sits alongside it in the `review` shell.
+        mrva = pkgs.python3Packages.buildPythonApplication rec {
+          pname = "mrva";
+          version = "0.5.0";
+          pyproject = true;
+          src = pkgs.fetchPypi {
+            inherit pname version;
+            hash = "sha256-IWsUcUFAk0lUHDMlPj+wssONUIU+Xcq9zNeVeJ5h9Ug=";
+          };
+          build-system = [ pkgs.python3Packages.poetry-core ];
+          dependencies = with pkgs.python3Packages; [ httpx jinja2 ];
+          pythonImportsCheck = [ "mrva" ];
+          meta = {
+            description = "Terminal-first CodeQL multi-repo variant analysis";
+            homepage = "https://github.com/trailofbits/mrva";
+            license = lib.licenses.agpl3Plus;
+            mainProgram = "mrva";
+          };
+        };
 
         # The built children for the integration bundles.
         daemonBin = daemon-node.packages.${system}.daemon;
@@ -248,6 +369,26 @@
         # superproject build outputs still need `?submodules=1`, but this shell does not).
         devShells.default = pkgs.mkShell {
           packages = [ pkgs.just ];
+        };
+
+        # Opt-in code-review / tech-debt tooling. Entered explicitly (`nix develop .#review`, or via
+        # the `just cursor` / MCP wrapper); never on the free default path. Sources `.env` at entry
+        # so CS_ACCESS_TOKEN / GITHUB_TOKEN are available to cs / cs-mcp / mrva without baking any
+        # secret into the store.
+        devShells.review = pkgs.mkShell {
+          packages = [
+            pkgsUnfree.codeql
+            mrva
+            codescene-cli
+            codescene-mcp
+            pkgs.gh
+            pkgs.jq
+            pkgs.curl
+            pkgs.unzip
+          ];
+          shellHook = ''
+            set -a; [ -f "$PWD/.env" ] && . "$PWD/.env"; set +a
+          '';
         };
       }
     );

@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# CodeScene MCP launcher for Cursor (referenced from .cursor/mcp.json).
+# Self-contained so it works no matter how Cursor was started: it sources the
+# gitignored .env for CS_ACCESS_TOKEN (never committed) and runs the pinned cs-mcp
+# from the opt-in `review` devShell. Keeping the token in .env means .cursor/mcp.json
+# stays secret-free.
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$root"
+
+set -a
+[ -f .env ] && . ./.env
+set +a
+
+exec nix develop .#review --command cs-mcp "$@"
