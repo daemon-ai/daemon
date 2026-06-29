@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 Jarrad Hope
+
 //! Basic-chat scenarios (user story 03, CHA-1 / CHA-2): a real turn crosses the socket - the client
 //! sends Submit{StartTurn} and consumes the daemon's AgentEvent stream via Subscribe, rather than
 //! the local TurnController simulator.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 Jarrad Hope
+
 //! Phase 6a Channels read-surface scenario (story 04: EIO-1/3/8): a fresh GUI attaches to a
 //! pre-started daemon (behind a recording proxy) and runs the headless channels probe
 //! (`DAEMON_APP_CHANNELS_PROBE`): refresh the transport adapters + instances, then enumerate

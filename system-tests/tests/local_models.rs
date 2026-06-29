@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 Jarrad Hope
+
 //! Local model track (Phase 2): search -> quant -> download -> install -> run over llama.cpp.
 //!
 //! The hermetic variant runs against the default daemon and proves the client wires every

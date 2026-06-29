@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 Jarrad Hope
+
 //! First-run onboarding scenarios (user story 01, CON-1 / CON-1b): a fresh client
 //! (`setupComplete=false`) drives the "Local" connect, reaches a healthy daemon, and persists setup.
 //!

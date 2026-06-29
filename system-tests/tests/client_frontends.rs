@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 Jarrad Hope
+
 //! Frontend smoke scenarios: launch the real GUI/TUI client against the recording proxy in daemon
 //! mode and offscreen, proving the daemon-mode service graph + vendored codec initialize end-to-end
 //! without crashing. They skip when the client binary env var is unset (e.g. CI didn't build it).

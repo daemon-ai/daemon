@@ -1,0 +1,15 @@
+daemon (superproject)
+Copyright (c) 2026 Jarrad Hope
+
+This repository is an aggregate of independently-licensed components. See
+LICENSING.md for the authoritative per-component breakdown.
+
+  * Superproject integration glue (system-tests/, flake.nix, justfile,
+    scripts/) is dual-licensed MIT OR Apache-2.0 (see LICENSE-MIT and
+    LICENSE-APACHE).
+  * daemon-node/ (submodule) is licensed MIT OR Apache-2.0; see
+    daemon-node/NOTICE for its third-party attributions.
+  * daemon-app/ (submodule) is licensed MPL-2.0; see
+    daemon-app/THIRD-PARTY-NOTICES.md for its third-party attributions.
+
+SPDX-License-Identifier: MIT OR Apache-2.0

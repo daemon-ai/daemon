@@ -2,7 +2,7 @@
   description = "daemon superproject: cross-repo codec sync + end-to-end integration";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
     flake-utils.url = "github:numtide/flake-utils";
 
     # The two children, consumed ONLY by the integration `bundled-*` outputs below (the daemon
@@ -240,6 +240,14 @@
           };
 
           default = self.apps.${system}.status;
+        };
+
+        # `just` is the entry point for every repo task (lint / deny / build-all / codec / e2e); the
+        # recipes themselves re-enter the per-repo Nix devShells. Per AGENTS.md there are no host
+        # tools, so the task runner must come from the flake too. Enter with `nix develop` (the
+        # superproject build outputs still need `?submodules=1`, but this shell does not).
+        devShells.default = pkgs.mkShell {
+          packages = [ pkgs.just ];
         };
       }
     );

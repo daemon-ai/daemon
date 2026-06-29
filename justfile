@@ -144,6 +144,21 @@ secrets:
 spell:
     nix develop ./daemon-node --command typos
 
+# REUSE/SPDX licensing compliance across the superproject + both submodules.
+# Uses the pinned `reuse` from nixpkgs. The superproject and daemon-app are
+# compliant; daemon-node has a known remaining set (bundled third-party skill
+# reference docs under crates/skills/.../research/) still pending provenance
+# review before it can be marked compliant.
+reuse:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    status=0
+    for repo in . daemon-node daemon-app; do
+      echo "==== reuse lint: $repo ===="
+      (cd "$repo" && nix run nixpkgs#reuse -- lint) || status=1
+    done
+    exit "$status"
+
 # Copy/paste duplication report across both source trees (jscpd via npx; first run fetches it).
 dup:
     nix develop ./daemon-node --command npx --yes jscpd@4 \

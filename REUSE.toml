@@ -1,0 +1,32 @@
+version = 1
+
+# The superproject is integration glue around two submodules (each carries its
+# own licensing). First-party Rust sources under system-tests/ carry SPDX
+# headers; this file declares licensing for the build/config/docs glue that
+# cannot carry a comment header. Submodule trees (daemon-app/, daemon-node/) are
+# governed by their own REUSE.toml / license files and are out of scope here.
+
+[[annotations]]
+path = [
+    "flake.nix",
+    "flake.lock",
+    "justfile",
+    "README.md",
+    "AGENTS.md",
+    "LICENSING.md",
+    "NOTICE",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    ".gitignore",
+    ".gitmodules",
+    ".env",
+    ".typos.toml",
+    "daemon.code-workspace",
+    "system-tests/Cargo.toml",
+    "system-tests/Cargo.lock",
+    "scripts/**",
+    "user-stories/**",
+    ".github/**",
+]
+SPDX-FileCopyrightText = "2026 Jarrad Hope"
+SPDX-License-Identifier = "MIT OR Apache-2.0"

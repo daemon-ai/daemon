@@ -50,3 +50,17 @@ nix run   '.?submodules=1'                              # read-only status + dri
 
 CI builds the pure derivation and fails on drift; nothing mutates the tree
 except the explicit `update-codec`.
+
+## Licensing
+
+This is an aggregate of independently-licensed components (copyright (c) 2026
+Jarrad Hope):
+
+- `daemon-node/` (submodule) - `MIT OR Apache-2.0`
+- `daemon-app/` (submodule) - `MPL-2.0`
+- superproject glue (`system-tests/`, `flake.nix`, `justfile`, `scripts/`) -
+  `MIT OR Apache-2.0` (see [`LICENSE-MIT`](LICENSE-MIT) /
+  [`LICENSE-APACHE`](LICENSE-APACHE))
+
+See [`LICENSING.md`](LICENSING.md) for the full breakdown and rationale, and
+[`NOTICE`](NOTICE) for third-party attributions.

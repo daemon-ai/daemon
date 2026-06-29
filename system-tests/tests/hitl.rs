@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 Jarrad Hope
+
 //! Human-in-the-loop scenarios (user story 03 remainder: CHA-4 approvals, CHA-5 clarify, PRO-11
 //! inbox, CHA-6 interrupt, CHA-7 slash, CHA-8 search).
 //!

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 Jarrad Hope
+
 //! Phase 4 filesystem-seam scenario: the daemon-backed `DaemonFsService` drives the GUI's
 //! explorer/editor over the wire. A fresh GUI attaches to a pre-started daemon (behind a recording
 //! proxy) and runs the headless fs probe (`DAEMON_APP_FS_PROBE`): listRoots -> open(root) -> write a

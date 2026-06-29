@@ -2,6 +2,7 @@
 name = "daemon-system-tests"
 version = "0.0.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 publish = false
 description = "Cross-repo end-to-end tests: drive the real GUI/TUI client against the real daemon over an isolated Unix socket, asserting on a typed protocol trace."
 

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 Jarrad Hope
+
 //! Phase 5b fleet scenario (story 02: PRO-9 view + PRO-10 control): a fresh GUI attaches to a
 //! pre-started daemon (behind a recording proxy) and runs the headless fleet probe
 //! (`DAEMON_APP_FLEET_PROBE`): refresh the subagent `Tree`, then `Pause` a unit. We assert the

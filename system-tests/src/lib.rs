@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 Jarrad Hope
+
 //! daemon-system-tests: the Rust spine for cross-repo end-to-end tests.
 //!
 //! The client is thin, so the highest-value assertions live at the socket boundary. This harness

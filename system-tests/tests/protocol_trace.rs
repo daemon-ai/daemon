@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 Jarrad Hope
+
 //! End-to-end protocol-trace scenarios. These need the real binaries (`DAEMON_BIN`,
 //! `DAEMON_CLI_BIN`); they skip cleanly when those are not set so `cargo test` is still green in a
 //! bare checkout. The build/CI layer points the env vars at the artifacts it built.

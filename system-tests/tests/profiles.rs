@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 Jarrad Hope
+
 //! Profiles & agents scenarios (user story 02): the client lists real profiles (PRO-1), binds a
 //! turn to a chosen profile (PRO-5), and per-profile credential isolation holds (PRO-6).
 
