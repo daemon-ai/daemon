@@ -161,8 +161,14 @@ e2e-protocol: build-node
 # language. The Rust gate uses default features to mirror the workspace CI gate (the engine
 # lanes - llama/mistralrs/hyperon - are deliberately separate outputs that need native libs).
 
-# Run every fast static gate (version consistency + Rust + C++/QML + secrets + spelling).
-lint: check-version lint-rust lint-cpp secrets spell
+# Run every fast static gate (version consistency + Rust + C++/QML + secrets + spelling + schema).
+lint: check-version lint-rust lint-cpp secrets spell check-schema
+
+# On-disk schema-drift gate: each rusqlite store's live schema must match its committed golden
+# (the on-disk analogue of `codec-drift`). A DDL change must add a migration AND refresh the golden
+# (`DAEMON_UPDATE_SCHEMA=1 cargo test … schema_matches_golden`).
+check-schema:
+    cd daemon-node && nix develop --command cargo test -p daemon-store --features sqlite -p daemon-context-lcm -p daemon-mnemosyne schema_matches_golden migration_ladder
 
 # Rust: rustfmt check + clippy with warnings denied (the de-facto lint gate).
 lint-rust:
