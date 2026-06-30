@@ -31,6 +31,20 @@
         pkgs = import nixpkgs { inherit system; };
         lib = pkgs.lib;
 
+        # Bundle/product version: the SemVer base lives in `./VERSION` (the human label over the
+        # submodule gitlinks, which pin the exact child commits). The build-metadata id is derived
+        # from the superproject source revision, retaining the off-tag / dirty marker like phosphor.
+        # Stamped into the bundle wrappers as DAEMON_BUNDLE_VERSION.
+        baseVersion = lib.strings.trim (builtins.readFile ./VERSION);
+        buildId =
+          if self ? shortRev then
+            "g${self.shortRev}"
+          else if self ? dirtyShortRev then
+            "g${lib.removeSuffix "-dirty" self.dirtyShortRev}.dirty"
+          else
+            "nar${builtins.substring 0 8 (lib.removePrefix "sha256-" (self.narHash or "sha256-unknown"))}";
+        bundleVersion = "${baseVersion}+${buildId}";
+
         # --- opt-in code-review / tech-debt tooling (the `review` devShell) ---------------------
         # Unfree allowance scoped to exactly these names, so the free default / codec / bundle
         # outputs (which use `pkgs` above) never evaluate an unfree package - a free-only
@@ -175,7 +189,8 @@
                 if [ -e "$out/bin/$client" ]; then
                   wrapProgram "$out/bin/$client" \
                     --set-default DAEMON_BIN "${daemonBin}/bin/daemon" \
-                    --set-default DAEMON_APP_SERVICE_MODE "daemon"
+                    --set-default DAEMON_APP_SERVICE_MODE "daemon" \
+                    --set-default DAEMON_BUNDLE_VERSION "${bundleVersion}"
                 fi
               done
             '';

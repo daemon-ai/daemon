@@ -32,6 +32,84 @@ bundle:
     nix build ".?submodules=1#bundled-app" --out-link result-bundled-app
     nix build ".?submodules=1#bundled-tui" --out-link result-bundled-tui
 
+# --- versioning -----------------------------------------------------------
+# Each repo owns its SemVer in a top-level VERSION file; the build systems enrich it with a git
+# build-metadata suffix (daemon-node/crates/contracts/daemon-common/build.rs and
+# daemon-app/cmake/Version.cmake). The superproject VERSION is the bundle/product label.
+
+# Print each component's version (node / app / bundle) plus the wire versions for context.
+version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    printf '%-13s %s\n' "bundle:" "$(tr -d '\r\n' < VERSION)"
+    printf '%-13s %s\n' "daemon-node:" "$(tr -d '\r\n' < daemon-node/VERSION)"
+    printf '%-13s %s\n' "daemon-app:" "$(tr -d '\r\n' < daemon-app/VERSION)"
+    wire="$(sed -n 's/.*pub const CURRENT: Self = Self(\([0-9]*\)).*/\1/p' \
+      daemon-node/crates/contracts/daemon-common/src/lib.rs | head -n1 || true)"
+    mux="$(sed -n 's/.*kWireVersion = \([0-9]*\).*/\1/p' \
+      daemon-app/src/core/daemon/node_api_codec.h | head -n1 || true)"
+    [ -n "$wire" ] && printf '%-13s %s\n' "wire (api):" "$wire" || true
+    [ -n "$mux" ] && printf '%-13s %s\n' "wire (mux):" "$mux" || true
+
+# Gate: each VERSION is strict SemVer, and daemon-node/VERSION matches its Cargo workspace version
+# (the one place the base is duplicated). Part of the `lint` umbrella.
+check-version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    status=0
+    semver='^[0-9]+\.[0-9]+\.[0-9]+$'
+    for f in VERSION daemon-node/VERSION daemon-app/VERSION; do
+      v="$(tr -d '\r\n' < "$f")"
+      if ! [[ "$v" =~ $semver ]]; then
+        echo "check-version: $f is not strict SemVer X.Y.Z (got '$v')" >&2
+        status=1
+      fi
+    done
+    node_file="$(tr -d '\r\n' < daemon-node/VERSION)"
+    node_cargo="$(sed -n 's/^version = "\(.*\)"/\1/p' daemon-node/Cargo.toml | head -n1)"
+    if [ "$node_file" != "$node_cargo" ]; then
+      echo "check-version: daemon-node/VERSION ($node_file) != [workspace.package].version ($node_cargo)" >&2
+      status=1
+    fi
+    if [ "$status" -eq 0 ]; then echo "check-version: OK"; fi
+    exit "$status"
+
+# Set a repo's version (the only file a human edits): writes <repo>/VERSION and mechanically syncs
+# the derived copies the build tools can't read live - daemon-node's Cargo.toml
+# [workspace.package].version and daemon-app's packaging/UPDATES.json. daemon-app's CMake reads
+# VERSION directly, so it needs no sync. `just check-version` still guards against any drift.
+# Usage: `just set-version daemon-node 0.0.2` (or `daemon-app`, or `.` for the superproject bundle).
+set-version repo version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! [[ "{{version}}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      echo "set-version: version must be SemVer X.Y.Z (got '{{version}}')" >&2
+      exit 1
+    fi
+    case "{{repo}}" in
+      .|daemon-node|daemon-app) ;;
+      *) echo "set-version: repo must be one of: . daemon-node daemon-app (got '{{repo}}')" >&2; exit 1 ;;
+    esac
+    printf '%s\n' "{{version}}" > "{{repo}}/VERSION"
+    echo "set-version: {{repo}}/VERSION -> {{version}}"
+    if [ "{{repo}}" = "daemon-node" ]; then
+      # Mirror into the workspace package version (the literal Cargo requires; first line-anchored
+      # `version =`, i.e. the [workspace.package] one - the deps use `name = { ... }`).
+      sed -i '0,/^version = ".*"/s//version = "{{version}}"/' daemon-node/Cargo.toml
+      echo "set-version: daemon-node/Cargo.toml [workspace.package].version -> {{version}}"
+    elif [ "{{repo}}" = "daemon-app" ]; then
+      # Mirror into the desktop updater feed.
+      sed -i 's/"latest-version": "[^"]*"/"latest-version": "{{version}}"/' \
+        daemon-app/packaging/UPDATES.json
+      echo "set-version: daemon-app/packaging/UPDATES.json latest-version -> {{version}}"
+    fi
+    echo "set-version: done (verify with: just check-version)"
+
+# Cut a release tag from a repo's VERSION file (SemVer + clean-tree + tag==vVERSION + monotonic bump).
+# Usage: `just release daemon-node` (or `daemon-app`, or omit for the superproject). DRY_RUN=1 previews.
+release repo=".":
+    nix develop ./daemon-node --command bash scripts/release.sh {{repo}}
+
 # --- codec contract -------------------------------------------------------
 
 # Prove the generated C codec round-trips real ciborium fixtures (daemon-node).
@@ -83,8 +161,8 @@ e2e-protocol: build-node
 # language. The Rust gate uses default features to mirror the workspace CI gate (the engine
 # lanes - llama/mistralrs/hyperon - are deliberately separate outputs that need native libs).
 
-# Run every fast static gate (Rust + C++/QML + secrets + spelling).
-lint: lint-rust lint-cpp secrets spell
+# Run every fast static gate (version consistency + Rust + C++/QML + secrets + spelling).
+lint: check-version lint-rust lint-cpp secrets spell
 
 # Rust: rustfmt check + clippy with warnings denied (the de-facto lint gate).
 lint-rust:

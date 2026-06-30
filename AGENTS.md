@@ -21,6 +21,22 @@ from the `daemon-node` CDDL contract.
 - `just codec-drift`  # gate: vendored copy vs the pinned contract
 - `just update-codec` # regenerate into the working tree after a contract change
 
+## Versioning / releases (independent per-repo SemVer)
+
+Each repo owns its own SemVer in a top-level `VERSION` file (the only file a human edits); the build
+systems enrich it with a git build-metadata suffix (`X.Y.Z+<n>.g<hash>[.dirty]`, a bare `X.Y.Z` on a
+clean tag). Bump through the recipes — never hand-edit the derived copies
+(`daemon-node/Cargo.toml`, `daemon-app/packaging/UPDATES.json`).
+
+- `just version`                    # print node / app / bundle versions (+ api/mux wire versions)
+- `just set-version <repo> <X.Y.Z>` # write <repo>/VERSION and mechanically sync its mirrors
+- `just check-version`              # gate (part of `just lint`): SemVer + node VERSION == Cargo version
+- `just release <repo>`             # tag vX.Y.Z (clean tree + tag==VERSION + monotonic bump; DRY_RUN=1)
+
+`<repo>` is `.` (the superproject bundle/product label), `daemon-node`, or `daemon-app`. The
+submodule gitlinks pin the exact child commits a bundle ships; the wire protocol (`WireVersion`)
+governs node↔app compatibility separately from these release versions.
+
 ## Occasional cleanup (advisory — never blind-delete)
 
 `just audit-cleanup` (unused deps, unused functions, duplication, unused includes), plus
