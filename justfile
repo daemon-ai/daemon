@@ -162,13 +162,27 @@ e2e-protocol: build-node
 # lanes - llama/mistralrs/hyperon - are deliberately separate outputs that need native libs).
 
 # Run every fast static gate (version consistency + Rust + C++/QML + secrets + spelling + schema).
-lint: check-version lint-rust lint-cpp secrets spell check-schema
+lint: check-version lint-rust lint-cpp secrets spell check-schema check-config-reference
 
 # On-disk schema-drift gate: each rusqlite store's live schema must match its committed golden
 # (the on-disk analogue of `codec-drift`). A DDL change must add a migration AND refresh the golden
 # (`DAEMON_UPDATE_SCHEMA=1 cargo test … schema_matches_golden`).
 check-schema:
     cd daemon-node && nix develop --command cargo test -p daemon-store --features sqlite -p daemon-context-lcm -p daemon-mnemosyne -- schema_matches_golden migration_ladder
+
+# Doc-drift gate: the committed docs/config-reference.md must match the generator
+# (`daemon config reference`). The generator (NodeConfig::default) is the single source of truth;
+# this replaces the former compile-time include_str! test (which broke the sandboxed crate build).
+# Regenerate with `just update-config-reference`.
+check-config-reference:
+    cd daemon-node && nix develop --command bash -euo pipefail -c '\
+      diff -u docs/config-reference.md <(cargo run -q -p daemon --bin daemon -- config reference) \
+      || { echo "docs/config-reference.md is stale; run: just update-config-reference" >&2; exit 1; }'
+
+# Regenerate the committed config reference from the generator (the single source of truth).
+update-config-reference:
+    cd daemon-node && nix develop --command bash -euo pipefail -c '\
+      cargo run -q -p daemon --bin daemon -- config reference > docs/config-reference.md'
 
 # Rust: rustfmt check + clippy with warnings denied (the de-facto lint gate).
 lint-rust:
