@@ -168,7 +168,7 @@ lint: check-version lint-rust lint-cpp secrets spell check-schema
 # (the on-disk analogue of `codec-drift`). A DDL change must add a migration AND refresh the golden
 # (`DAEMON_UPDATE_SCHEMA=1 cargo test … schema_matches_golden`).
 check-schema:
-    cd daemon-node && nix develop --command cargo test -p daemon-store --features sqlite -p daemon-context-lcm -p daemon-mnemosyne schema_matches_golden migration_ladder
+    cd daemon-node && nix develop --command cargo test -p daemon-store --features sqlite -p daemon-context-lcm -p daemon-mnemosyne -- schema_matches_golden migration_ladder
 
 # Rust: rustfmt check + clippy with warnings denied (the de-facto lint gate).
 lint-rust:
