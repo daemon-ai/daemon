@@ -155,6 +155,99 @@ e2e-protocol: build-node
     export DAEMON_CLI_BIN="$PWD/daemon-node/target/debug/daemon-cli"
     cd system-tests && nix develop ../daemon-node --command cargo test --test protocol_trace -- --test-threads=1
 
+# --- dev-state reset --------------------------------------------------------
+
+# Reset all local daemon/app state so a verification run starts from a clean slate: stop the
+# app-managed daemon (pidfile-first; by-exe only for daemon-node builds - never a blanket pkill),
+# then remove the managed socket + pidfile, the app's QSettings/config + data + cache dirs, the
+# node's default data dir (sqlite store + auth db), and legacy $TMPDIR daemon-store leftovers.
+# Idempotent (exit 0 when there is nothing to clean). DRY_RUN=1 previews without killing/removing.
+dev-reset:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dry="${DRY_RUN:-0}"
+    note() { echo "dev-reset: $*"; }
+    tmp="${TMPDIR:-/tmp}"
+    cfg="${XDG_CONFIG_HOME:-$HOME/.config}"
+    data="${XDG_DATA_HOME:-$HOME/.local/share}"
+    cache="${XDG_CACHE_HOME:-$HOME/.cache}"
+    # Managed-socket dirs: the app default (RuntimeLocation, then its TempLocation fallback - see
+    # isettings_store.h defaultManagedSocketPath) plus the dir of any env-override socket.
+    sock_dirs=()
+    if [ -n "${XDG_RUNTIME_DIR:-}" ]; then sock_dirs+=("$XDG_RUNTIME_DIR/daemon"); fi
+    sock_dirs+=("$tmp/daemon")
+    socks=()
+    for d in "${sock_dirs[@]}"; do socks+=("$d/daemon.sock"); done
+    for s in "${DAEMON_APP_SOCKET:-}" "${DAEMON_SOCKET_PATH:-}"; do
+      if [ -n "$s" ]; then socks+=("$s"); sock_dirs+=("$(dirname "$s")"); fi
+    done
+    # 1) Stop daemons we own. Pidfile-first: local_daemon_launcher.cpp records every managed spawn
+    #    in <socket dir>/daemon.pid. A pid is signalled only when its comm is exactly `daemon`.
+    term() {
+      local pid="$1" why="$2" comm
+      comm="$(cat "/proc/$pid/comm" 2>/dev/null || true)"
+      if [ "$comm" != "daemon" ]; then
+        if [ -n "$comm" ]; then note "skip pid $pid ($why): comm '$comm' is not 'daemon'"; fi
+        return 0
+      fi
+      if [ "$dry" = "1" ]; then note "would stop pid $pid ($why)"; return 0; fi
+      note "stopping pid $pid ($why)"
+      kill "$pid" 2>/dev/null || true
+      for _ in $(seq 50); do
+        kill -0 "$pid" 2>/dev/null || return 0
+        sleep 0.1
+      done
+      note "pid $pid ignored SIGTERM; sending SIGKILL"
+      kill -9 "$pid" 2>/dev/null || true
+    }
+    for d in "${sock_dirs[@]}"; do
+      pf="$d/daemon.pid"
+      [ -f "$pf" ] || continue
+      pid="$(tr -cd '0-9' < "$pf" || true)"
+      if [ -n "$pid" ] && [ "$pid" -gt 1 ]; then term "$pid" "pidfile $pf"; fi
+    done
+    # Stragglers from pre-pidfile builds: same-user processes named `daemon` whose executable is a
+    # daemon-node build we spawned (a bundled /nix/store/.../bin/daemon or this checkout's build
+    # outputs). Anything else named `daemon` is left alone.
+    for pid in $(pgrep -x -u "$(id -u)" daemon 2>/dev/null || true); do
+      exe="$(readlink "/proc/$pid/exe" 2>/dev/null || true)"
+      # A non-dumpable process hides its exe link even from the owning user; argv[0] (set to the
+      # absolute binary path by the launcher / a plain spawn) still names the binary.
+      if [ -z "$exe" ]; then
+        exe="$(tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null | head -n 1 || true)"
+      fi
+      case "$exe" in
+        /nix/store/*/bin/daemon | "$PWD"/daemon-node/target/*/daemon | "$PWD"/result*/bin/daemon)
+          term "$pid" "exe $exe" ;;
+        *)
+          if [ -n "$exe" ]; then note "leaving pid $pid alone (exe $exe is not a daemon-node build)"; fi ;;
+      esac
+    done
+    # 2) Remove on-disk state, printing each existing path as it goes.
+    remove() {
+      local p
+      for p in "$@"; do
+        if [ -e "$p" ] || [ -L "$p" ]; then
+          if [ "$dry" = "1" ]; then note "would remove $p"; else note "removing $p"; rm -rf -- "$p"; fi
+        fi
+      done
+    }
+    remove "${socks[@]}"
+    for d in "${sock_dirs[@]}"; do remove "$d/daemon.pid"; done
+    remove "$cfg/daemon-app"           # QSettings: daemon-app.conf + daemon-tui.conf (first-run flag, conn target)
+    remove "$data/daemon-app"          # AppDataLocation: managed-daemon data dir, daemon_cache.db, mock/
+    remove "$cache/daemon-app"         # CacheLocation: image cache, qmlcache
+    remove "$data/daemon"              # node default data dir: daemon-store.sqlite, auth.sqlite, blobs/, workspaces/
+    remove "$tmp"/daemon-store.sqlite* # legacy pre-hardening store default (+ -wal/-shm)
+    remove "$tmp/daemon-api.sock"      # node standalone default socket
+    if [ -n "${DAEMON_STORE_PATH:-}" ]; then
+      remove "$DAEMON_STORE_PATH" "$DAEMON_STORE_PATH-wal" "$DAEMON_STORE_PATH-shm"
+    fi
+    if [ "$dry" != "1" ]; then
+      for d in "${sock_dirs[@]}"; do rmdir "$d" 2>/dev/null || true; done
+    fi
+    note "clean"
+
 # --- lint / format gates --------------------------------------------------
 # Tools come from the per-repo Nix devShells (`nix develop`), so these run the same
 # pinned versions everywhere. `lint` is the umbrella gate; the sub-recipes run a single
