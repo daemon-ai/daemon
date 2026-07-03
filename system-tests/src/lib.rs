@@ -96,14 +96,26 @@ impl Daemon {
         let log_err = log_file.try_clone()?;
 
         let mut cmd = Command::new(&bins.daemon);
-        cmd.env("DAEMON_API_SOCKET", &socket)
+        cmd.env("DAEMON_SOCKET_PATH", &socket)
+            // The node boots UNCONFIGURED by default (a turn fails clearly, never a silent
+            // mock), so the hermetic scenarios must ask for the deterministic in-tree provider
+            // explicitly. `extra_env` is applied after this block, so the opt-in live-provider
+            // runs (e.g. DAEMON_MODEL_PROVIDER=genai + a real key) still override it.
+            .env("DAEMON_MODEL_PROVIDER", "mock")
+            // A non-empty model makes the seeded default profile CONFIGURED, so the client's
+            // first-run node gate (A2) auto-skips the wizard and persists setupComplete - the
+            // contract the connect-only onboarding scenarios assert. MockProvider ignores it.
+            .env("DAEMON_MODEL", "mock-model")
             .env("DAEMON_DATA_DIR", &data_dir)
             .env("HOME", &home)
             .env("XDG_DATA_HOME", home.join(".local/share"))
             .env("XDG_CONFIG_HOME", home.join(".config"))
             .env("XDG_CACHE_HOME", home.join(".cache"))
             .env("RUST_BACKTRACE", "1")
-            .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
+            .env(
+                "RUST_LOG",
+                std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
+            )
             .stdin(Stdio::null())
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(log_err));
@@ -119,9 +131,9 @@ impl Daemon {
                 Ok(())
             });
         }
-        let child = cmd.spawn().with_context(|| {
-            format!("spawning daemon {}", bins.daemon.display())
-        })?;
+        let child = cmd
+            .spawn()
+            .with_context(|| format!("spawning daemon {}", bins.daemon.display()))?;
         let pgid = child.id() as i32;
 
         let daemon = Daemon {
@@ -328,7 +340,11 @@ fn decode_client_request(payload: &[u8]) -> Option<ApiRequest> {
     if let Ok(frame) = from_cbor::<WireC2S>(payload) {
         return match frame {
             WireC2S::Call { req, .. } | WireC2S::Open { req, .. } => Some(req),
-            WireC2S::Hello { .. } | WireC2S::Cancel { .. } => None,
+            WireC2S::Hello { .. }
+            | WireC2S::Cancel { .. }
+            | WireC2S::AuthStart { .. }
+            | WireC2S::AuthStep { .. }
+            | WireC2S::AuthResume { .. } => None,
         };
     }
     from_cbor::<ApiRequest>(payload).ok()
@@ -340,14 +356,24 @@ fn decode_daemon_response(payload: &[u8]) -> Option<ApiResponse> {
     if let Ok(frame) = from_cbor::<WireS2C>(payload) {
         return match frame {
             WireS2C::Reply { res, .. } | WireS2C::Item { res, .. } => Some(res),
-            WireS2C::Hello { .. } | WireS2C::End { .. } | WireS2C::Reset { .. } => None,
+            WireS2C::Hello { .. }
+            | WireS2C::End { .. }
+            | WireS2C::Reset { .. }
+            | WireS2C::AuthChallenge { .. }
+            | WireS2C::AuthOk { .. }
+            | WireS2C::AuthError { .. } => None,
         };
     }
     from_cbor::<ApiResponse>(payload).ok()
 }
 
 /// Read length-framed CBOR from `from`, decode + record, and forward verbatim to `to`.
-fn relay(mut from: UnixStream, mut to: UnixStream, from_client: bool, trace: Arc<Mutex<Vec<Frame>>>) {
+fn relay(
+    mut from: UnixStream,
+    mut to: UnixStream,
+    from_client: bool,
+    trace: Arc<Mutex<Vec<Frame>>>,
+) {
     loop {
         let mut len_buf = [0u8; 4];
         if from.read_exact(&mut len_buf).is_err() {
@@ -371,9 +397,7 @@ fn relay(mut from: UnixStream, mut to: UnixStream, from_client: bool, trace: Arc
             len,
         });
 
-        if to.write_all(&len_buf).is_err()
-            || to.write_all(&payload).is_err()
-            || to.flush().is_err()
+        if to.write_all(&len_buf).is_err() || to.write_all(&payload).is_err() || to.flush().is_err()
         {
             break;
         }
@@ -383,14 +407,21 @@ fn relay(mut from: UnixStream, mut to: UnixStream, from_client: bool, trace: Arc
 }
 
 /// Run `daemon-cli --socket <socket> <args...>`, returning success + captured stdout.
-pub fn run_cli(cli: &std::path::Path, socket: &std::path::Path, args: &[&str]) -> Result<(bool, String)> {
+pub fn run_cli(
+    cli: &std::path::Path,
+    socket: &std::path::Path,
+    args: &[&str],
+) -> Result<(bool, String)> {
     let out = Command::new(cli)
         .arg("--socket")
         .arg(socket)
         .args(args)
         .output()
         .with_context(|| format!("running {} {:?}", cli.display(), args))?;
-    Ok((out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned()))
+    Ok((
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    ))
 }
 
 /// The captured result of a one-shot client run (offscreen GUI render / TUI frame dump).
@@ -467,7 +498,9 @@ fn run_with_timeout(
     home: PathBuf,
     timeout: Duration,
 ) -> Result<ClientRun> {
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = cmd.spawn().context("spawning client")?;
     let deadline = Instant::now() + timeout;
     loop {
@@ -492,7 +525,11 @@ fn run_with_timeout(
 
 /// Drive the GUI (`daemon-app`) in its offscreen render-shot harness against `socket`. Renders the
 /// requested page to PNGs in a temp dir and exits; assert on the protocol trace the proxy captured.
-pub fn run_gui_offscreen(bin: &std::path::Path, socket: &std::path::Path, page: Option<&str>) -> Result<ClientRun> {
+pub fn run_gui_offscreen(
+    bin: &std::path::Path,
+    socket: &std::path::Path,
+    page: Option<&str>,
+) -> Result<ClientRun> {
     let (mut cmd, tmp, home) = isolated_client_command(bin, socket)?;
     let shots = tmp.path().join("shots");
     std::fs::create_dir_all(&shots)?;
@@ -507,7 +544,11 @@ pub fn run_gui_offscreen(bin: &std::path::Path, socket: &std::path::Path, page: 
 /// Drive the GUI headless until its daemon-mode auto-connect reaches "ready" (a real Health
 /// round-trip) or times out, then exit. Prints `DAEMON_APP_READY ok|timeout` on stdout. Lets a
 /// scenario hard-assert connectivity instead of racing the async connect.
-pub fn run_gui_wait_ready(bin: &std::path::Path, socket: &std::path::Path, timeout_ms: u32) -> Result<ClientRun> {
+pub fn run_gui_wait_ready(
+    bin: &std::path::Path,
+    socket: &std::path::Path,
+    timeout_ms: u32,
+) -> Result<ClientRun> {
     let (mut cmd, tmp, home) = isolated_client_command(bin, socket)?;
     cmd.env("QT_QPA_PLATFORM", "offscreen")
         .env("DAEMON_APP_WAIT_READY", timeout_ms.to_string());
@@ -516,7 +557,12 @@ pub fn run_gui_wait_ready(bin: &std::path::Path, socket: &std::path::Path, timeo
 
 /// Drive the TUI headless until its daemon-mode auto-connect reaches "ready" or times out (printing
 /// `DAEMON_APP_READY ok|timeout`), then dump one frame. Same hard-assert contract as the GUI.
-pub fn run_tui_wait_ready(bin: &std::path::Path, socket: &std::path::Path, dims: (u16, u16), timeout_ms: u32) -> Result<ClientRun> {
+pub fn run_tui_wait_ready(
+    bin: &std::path::Path,
+    socket: &std::path::Path,
+    dims: (u16, u16),
+    timeout_ms: u32,
+) -> Result<ClientRun> {
     let (mut cmd, tmp, home) = isolated_client_command(bin, socket)?;
     cmd.env("DAEMON_TUI_OFFSCREEN", format!("{}x{}", dims.0, dims.1))
         .env("DAEMON_APP_WAIT_READY", timeout_ms.to_string());
@@ -566,7 +612,11 @@ pub fn run_gui_first_run_spawns_daemon(
     let (mut cmd, tmp, home) = isolated_client_command_with_conf(gui, &socket, CONF_FRESH_MANAGED)?;
     cmd.env("QT_QPA_PLATFORM", "offscreen")
         .env("DAEMON_APP_WAIT_READY", timeout_ms.to_string())
-        .env("DAEMON_BIN", daemon_bin);
+        .env("DAEMON_BIN", daemon_bin)
+        // Inherited by the client-spawned daemon: deterministic provider + a configured seeded
+        // profile, so the first-run node gate auto-completes setup (see Daemon::start_with_env).
+        .env("DAEMON_MODEL_PROVIDER", "mock")
+        .env("DAEMON_MODEL", "mock-model");
     run_with_timeout(cmd, vec![tmp, sock_tmp], home, Duration::from_secs(30))
 }
 
@@ -581,7 +631,10 @@ pub fn run_tui_first_run_spawns_daemon(
     let (mut cmd, tmp, home) = isolated_client_command_with_conf(tui, &socket, CONF_FRESH_MANAGED)?;
     cmd.env("DAEMON_TUI_OFFSCREEN", format!("{}x{}", dims.0, dims.1))
         .env("DAEMON_APP_WAIT_READY", timeout_ms.to_string())
-        .env("DAEMON_BIN", daemon_bin);
+        .env("DAEMON_BIN", daemon_bin)
+        // Inherited by the client-spawned daemon (see run_gui_first_run_spawns_daemon).
+        .env("DAEMON_MODEL_PROVIDER", "mock")
+        .env("DAEMON_MODEL", "mock-model");
     run_with_timeout(cmd, vec![tmp, sock_tmp], home, Duration::from_secs(30))
 }
 

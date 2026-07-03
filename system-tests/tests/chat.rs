@@ -33,7 +33,9 @@ fn anthropic_key() -> Option<String> {
             return Some(k.trim().to_string());
         }
     }
-    let dotenv = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent()?.join(".env");
+    let dotenv = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()?
+        .join(".env");
     let text = std::fs::read_to_string(dotenv).ok()?;
     for line in text.lines() {
         if let Some(v) = line.trim().strip_prefix("ANTHROPIC_API_KEY=") {
@@ -49,12 +51,16 @@ fn anthropic_key() -> Option<String> {
 fn assert_turn_crossed(proxy: &RecordingProxy) {
     let frames = proxy.requests();
     assert!(
-        frames.iter().any(|r| matches!(r, ApiRequest::Submit { .. })),
+        frames
+            .iter()
+            .any(|r| matches!(r, ApiRequest::Submit { .. })),
         "expected a Submit{{StartTurn}} to cross the socket; frames: {:?}",
         frames
     );
     assert!(
-        frames.iter().any(|r| matches!(r, ApiRequest::Subscribe { .. })),
+        frames
+            .iter()
+            .any(|r| matches!(r, ApiRequest::Subscribe { .. })),
         "expected a Subscribe to cross the socket; frames: {:?}",
         frames
     );
@@ -136,7 +142,10 @@ fn turn_leaves_resumable_transcript() {
 
     let run = run_gui_chat(&gui, &proxy.socket, "Say hello.", 20000).expect("gui runs");
     assert!(
-        !parse_chat_answer(&run.stdout).unwrap_or_default().trim().is_empty(),
+        !parse_chat_answer(&run.stdout)
+            .unwrap_or_default()
+            .trim()
+            .is_empty(),
         "the turn did not stream"
     );
 
@@ -214,8 +223,13 @@ fn gui_chat_real_anthropic_turn() {
         daemon.log_contents()
     );
 
-    let run = run_gui_chat(&gui, &proxy.socket, "Reply with exactly the single word: pong.", 90000)
-        .expect("gui runs");
+    let run = run_gui_chat(
+        &gui,
+        &proxy.socket,
+        "Reply with exactly the single word: pong.",
+        90000,
+    )
+    .expect("gui runs");
     assert_turn_crossed(&proxy);
     let answer = parse_chat_answer(&run.stdout).unwrap_or_default();
     assert!(

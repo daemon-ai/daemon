@@ -89,7 +89,10 @@ fn tui_offscreen_initializes_in_daemon_mode() {
         run.stderr,
         daemon.log_contents()
     );
-    assert!(!run.stdout.is_empty(), "expected a rendered TUI frame on stdout");
+    assert!(
+        !run.stdout.is_empty(),
+        "expected a rendered TUI frame on stdout"
+    );
 
     let health = proxy
         .requests()
@@ -104,13 +107,17 @@ fn tui_offscreen_initializes_in_daemon_mode() {
 #[test]
 fn gui_daemon_mode_reaches_ready_and_queries_sessions() {
     if !have_daemon() {
-        eprintln!("skipping gui_daemon_mode_reaches_ready_and_queries_sessions: daemon binaries unset");
+        eprintln!(
+            "skipping gui_daemon_mode_reaches_ready_and_queries_sessions: daemon binaries unset"
+        );
         return;
     }
     let gui = match std::env::var_os("CLIENT_GUI_BIN") {
         Some(p) => PathBuf::from(p),
         None => {
-            eprintln!("skipping gui_daemon_mode_reaches_ready_and_queries_sessions: CLIENT_GUI_BIN unset");
+            eprintln!(
+                "skipping gui_daemon_mode_reaches_ready_and_queries_sessions: CLIENT_GUI_BIN unset"
+            );
             return;
         }
     };
@@ -131,7 +138,10 @@ fn gui_daemon_mode_reaches_ready_and_queries_sessions() {
         .wait_for_request(|r| matches!(r, ApiRequest::Health), Duration::from_secs(2))
         .expect("GUI sent a Health probe");
     proxy
-        .wait_for_request(|r| matches!(r, ApiRequest::SessionsQuery { .. }), Duration::from_secs(2))
+        .wait_for_request(
+            |r| matches!(r, ApiRequest::SessionsQuery { .. }),
+            Duration::from_secs(2),
+        )
         .expect("GUI sent a SessionsQuery once ready");
 }
 
@@ -140,13 +150,17 @@ fn gui_daemon_mode_reaches_ready_and_queries_sessions() {
 #[test]
 fn tui_daemon_mode_reaches_ready_and_queries_sessions() {
     if !have_daemon() {
-        eprintln!("skipping tui_daemon_mode_reaches_ready_and_queries_sessions: daemon binaries unset");
+        eprintln!(
+            "skipping tui_daemon_mode_reaches_ready_and_queries_sessions: daemon binaries unset"
+        );
         return;
     }
     let tui = match std::env::var_os("CLIENT_TUI_BIN") {
         Some(p) => PathBuf::from(p),
         None => {
-            eprintln!("skipping tui_daemon_mode_reaches_ready_and_queries_sessions: CLIENT_TUI_BIN unset");
+            eprintln!(
+                "skipping tui_daemon_mode_reaches_ready_and_queries_sessions: CLIENT_TUI_BIN unset"
+            );
             return;
         }
     };
@@ -167,6 +181,9 @@ fn tui_daemon_mode_reaches_ready_and_queries_sessions() {
         .wait_for_request(|r| matches!(r, ApiRequest::Health), Duration::from_secs(2))
         .expect("TUI sent a Health probe");
     proxy
-        .wait_for_request(|r| matches!(r, ApiRequest::SessionsQuery { .. }), Duration::from_secs(2))
+        .wait_for_request(
+            |r| matches!(r, ApiRequest::SessionsQuery { .. }),
+            Duration::from_secs(2),
+        )
         .expect("TUI sent a SessionsQuery once ready");
 }

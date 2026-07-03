@@ -175,6 +175,7 @@ fn local_models_smollm2_end_to_end() {
             repo: repo.clone(),
             revision: None,
             engine: ModelEngine::Llama,
+            after: None,
         },
     )
     .expect("ModelFiles round-trips")
@@ -184,6 +185,7 @@ fn local_models_smollm2_end_to_end() {
         other => panic!("ModelFiles unexpected: {other:?}"),
     };
     let pick = files
+        .items
         .iter()
         .filter(|f| f.quant.is_some() && (!f.is_split || f.is_first_shard))
         .min_by_key(|f| f.size_bytes)

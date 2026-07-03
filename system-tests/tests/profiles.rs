@@ -43,7 +43,8 @@ fn profile_listed(socket: &std::path::Path, id: &str) -> bool {
 
 /// A profile's model string (via ProfileGet), or empty if unknown.
 fn profile_model(socket: &std::path::Path, id: &str) -> String {
-    match api_call(socket, &ApiRequest::ProfileGet { id: id.into() }).expect("ProfileGet round-trips")
+    match api_call(socket, &ApiRequest::ProfileGet { id: id.into() })
+        .expect("ProfileGet round-trips")
     {
         ApiResponse::Profile(Some(spec)) => spec.model,
         _ => String::new(),
@@ -56,7 +57,9 @@ fn anthropic_key() -> Option<String> {
             return Some(k.trim().to_string());
         }
     }
-    let dotenv = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent()?.join(".env");
+    let dotenv = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()?
+        .join(".env");
     let text = std::fs::read_to_string(dotenv).ok()?;
     for line in text.lines() {
         if let Some(v) = line.trim().strip_prefix("ANTHROPIC_API_KEY=") {
@@ -86,12 +89,18 @@ fn gui_lists_real_profiles() {
     let proxy = RecordingProxy::start(daemon.socket.clone()).expect("proxy starts");
 
     // Onboarding settles the event loop, so the on-ready ProfileList flushes through the proxy.
-    let run = run_gui_onboard(&gui, &proxy.socket, "anthropic", "sk-ant-test", 10000)
-        .expect("gui runs");
-    assert!(run.stdout.contains("DAEMON_APP_READY ok"), "client did not reach ready");
+    let run =
+        run_gui_onboard(&gui, &proxy.socket, "anthropic", "sk-ant-test", 10000).expect("gui runs");
+    assert!(
+        run.stdout.contains("DAEMON_APP_READY ok"),
+        "client did not reach ready"
+    );
 
     assert!(
-        proxy.requests().iter().any(|r| matches!(r, ApiRequest::ProfileList)),
+        proxy
+            .requests()
+            .iter()
+            .any(|r| matches!(r, ApiRequest::ProfileList)),
         "expected the client to request ProfileList; frames: {:?}",
         proxy.requests()
     );
@@ -153,26 +162,44 @@ fn gui_creates_and_edits_a_profile() {
 
     let run = run_gui_profile(&gui, &proxy.socket, "work", "gpt-4o", "Be terse.", 15000)
         .expect("gui runs");
-    assert!(run.stdout.contains("DAEMON_APP_READY ok"), "client did not reach ready");
+    assert!(
+        run.stdout.contains("DAEMON_APP_READY ok"),
+        "client did not reach ready"
+    );
 
     assert!(
-        proxy.requests().iter().any(|r| matches!(r, ApiRequest::ProfileCreate { .. })),
+        proxy
+            .requests()
+            .iter()
+            .any(|r| matches!(r, ApiRequest::ProfileCreate { .. })),
         "expected a ProfileCreate; frames: {:?}",
         proxy.requests()
     );
     assert!(
-        proxy.requests().iter().any(|r| matches!(r, ApiRequest::ProfileUpdate { .. })),
+        proxy
+            .requests()
+            .iter()
+            .any(|r| matches!(r, ApiRequest::ProfileUpdate { .. })),
         "expected a ProfileUpdate; frames: {:?}",
         proxy.requests()
     );
 
-    assert!(profile_listed(&daemon.socket, "work"), "the created profile should be listed");
-    match api_call(&daemon.socket, &ApiRequest::ProfileGet { id: "work".into() })
-        .expect("ProfileGet round-trips")
+    assert!(
+        profile_listed(&daemon.socket, "work"),
+        "the created profile should be listed"
+    );
+    match api_call(
+        &daemon.socket,
+        &ApiRequest::ProfileGet { id: "work".into() },
+    )
+    .expect("ProfileGet round-trips")
     {
         ApiResponse::Profile(Some(spec)) => {
             assert_eq!(spec.model, "gpt-4o", "the edit should persist the model");
-            assert_eq!(spec.system_prompt, "Be terse.", "the edit should persist the prompt");
+            assert_eq!(
+                spec.system_prompt, "Be terse.",
+                "the edit should persist the prompt"
+            );
         }
         other => panic!("ProfileGet did not return the edited spec: {other:?}"),
     }
@@ -201,22 +228,36 @@ fn profile_clone_then_delete() {
         ApiResponse::Error(e) => panic!("ProfileClone failed: {e:?}"),
         _ => {}
     }
-    assert!(profile_listed(&daemon.socket, "work-clone"), "the clone should be listed");
+    assert!(
+        profile_listed(&daemon.socket, "work-clone"),
+        "the clone should be listed"
+    );
 
     // The clone is a copy of the source's spec (same provider/model), not a live link.
     let (src_model, clone_model) = (
         profile_model(&daemon.socket, &source),
         profile_model(&daemon.socket, "work-clone"),
     );
-    assert_eq!(src_model, clone_model, "the clone should copy the source's model");
+    assert_eq!(
+        src_model, clone_model,
+        "the clone should copy the source's model"
+    );
 
-    match api_call(&daemon.socket, &ApiRequest::ProfileDelete { id: "work-clone".into() })
-        .expect("ProfileDelete round-trips")
+    match api_call(
+        &daemon.socket,
+        &ApiRequest::ProfileDelete {
+            id: "work-clone".into(),
+        },
+    )
+    .expect("ProfileDelete round-trips")
     {
         ApiResponse::Ok => {}
         other => panic!("ProfileDelete did not return Ok: {other:?}"),
     }
-    assert!(!profile_listed(&daemon.socket, "work-clone"), "the deleted clone should be gone");
+    assert!(
+        !profile_listed(&daemon.socket, "work-clone"),
+        "the deleted clone should be gone"
+    );
 }
 
 /// PRO-7: export the active profile as a portable Distribution, then import it under a new id (the
@@ -238,11 +279,17 @@ fn profile_export_import_history_revert() {
     let active = active_profile_id(&daemon.socket);
 
     // PRO-7 export: the active profile serializes to a Distribution carrying its spec.
-    let dist = match api_call(&daemon.socket, &ApiRequest::ProfileExport { id: active.clone() })
-        .expect("ProfileExport round-trips")
+    let dist = match api_call(
+        &daemon.socket,
+        &ApiRequest::ProfileExport { id: active.clone() },
+    )
+    .expect("ProfileExport round-trips")
     {
         ApiResponse::Distribution(dist) => {
-            assert_eq!(dist.profile.id, active, "the distribution carries the exported profile");
+            assert_eq!(
+                dist.profile.id, active,
+                "the distribution carries the exported profile"
+            );
             dist
         }
         other => panic!("ProfileExport did not return a Distribution: {other:?}"),
@@ -262,31 +309,45 @@ fn profile_export_import_history_revert() {
         ApiResponse::ProfileId(id) => assert_eq!(id, "exported-copy", "import returns the new id"),
         other => panic!("ProfileImport did not return a ProfileId: {other:?}"),
     }
-    assert!(profile_listed(&daemon.socket, "exported-copy"), "the imported profile should list");
+    assert!(
+        profile_listed(&daemon.socket, "exported-copy"),
+        "the imported profile should list"
+    );
 
     // PRO-8: an edit appends a revision. Re-fetch the spec, tweak the model, and update.
-    let mut spec = match api_call(&daemon.socket, &ApiRequest::ProfileGet { id: active.clone() })
-        .expect("ProfileGet round-trips")
+    let mut spec = match api_call(
+        &daemon.socket,
+        &ApiRequest::ProfileGet { id: active.clone() },
+    )
+    .expect("ProfileGet round-trips")
     {
         ApiResponse::Profile(Some(spec)) => spec,
         other => panic!("ProfileGet did not return the active spec: {other:?}"),
     };
     spec.model = "edited-model".into();
-    match api_call(&daemon.socket, &ApiRequest::ProfileUpdate { spec }).expect("ProfileUpdate")
-    {
+    match api_call(&daemon.socket, &ApiRequest::ProfileUpdate { spec }).expect("ProfileUpdate") {
         ApiResponse::Ok => {}
         other => panic!("ProfileUpdate did not return Ok: {other:?}"),
     }
 
     // ProfileHistory lists the revision log (oldest first); revert to its first revision.
-    let revs = match api_call(&daemon.socket, &ApiRequest::ProfileHistory { id: active.clone() })
-        .expect("ProfileHistory round-trips")
+    let revs = match api_call(
+        &daemon.socket,
+        &ApiRequest::ProfileHistory {
+            id: active.clone(),
+            after: None,
+        },
+    )
+    .expect("ProfileHistory round-trips")
     {
         ApiResponse::Revisions(revs) => revs,
         other => panic!("ProfileHistory did not return Revisions: {other:?}"),
     };
-    assert!(!revs.is_empty(), "the edited profile should have at least one revision");
-    let first_seq = revs.first().expect("a revision").seq;
+    assert!(
+        !revs.items.is_empty(),
+        "the edited profile should have at least one revision"
+    );
+    let first_seq = revs.items.first().expect("a revision").seq;
 
     match api_call(
         &daemon.socket,
@@ -417,17 +478,18 @@ fn credential_gates_inference_per_profile() {
     .expect("daemon (genai) becomes ready");
 
     // The active profile id the node ships with (its credential key).
-    let active_profile = match daemon_system_tests::api_call(&daemon.socket, &ApiRequest::ProfileList)
-        .expect("ProfileList round-trips")
-    {
-        ApiResponse::Profiles(profiles) => profiles
-            .iter()
-            .find(|p| p.is_active)
-            .or_else(|| profiles.first())
-            .map(|p| p.id.to_string())
-            .expect("the node has at least one profile"),
-        other => panic!("ProfileList did not return Profiles: {other:?}"),
-    };
+    let active_profile =
+        match daemon_system_tests::api_call(&daemon.socket, &ApiRequest::ProfileList)
+            .expect("ProfileList round-trips")
+        {
+            ApiResponse::Profiles(profiles) => profiles
+                .iter()
+                .find(|p| p.is_active)
+                .or_else(|| profiles.first())
+                .map(|p| p.id.to_string())
+                .expect("the node has at least one profile"),
+            other => panic!("ProfileList did not return Profiles: {other:?}"),
+        };
 
     // Before any credential: a turn must FAIL (no provider, CON-8).
     let unprovisioned = run_turn_as_profile(

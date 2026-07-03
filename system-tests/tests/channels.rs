@@ -50,10 +50,16 @@ fn gui_channels_read_surface_wires_through() {
     // The adapter registry + instance + conversation queries really crossed the socket (proxy trace).
     let frames = proxy.requests();
     let has = |pred: fn(&ApiRequest) -> bool| frames.iter().any(pred);
-    assert!(has(|r| matches!(r, ApiRequest::TransportAdapters)), "no TransportAdapters: {frames:?}");
+    assert!(
+        has(|r| matches!(r, ApiRequest::TransportAdapters)),
+        "no TransportAdapters: {frames:?}"
+    );
     assert!(
         has(|r| matches!(r, ApiRequest::TransportInstances)),
         "no TransportInstances: {frames:?}"
     );
-    assert!(has(|r| matches!(r, ApiRequest::ConvList { .. })), "no ConvList: {frames:?}");
+    assert!(
+        has(|r| matches!(r, ApiRequest::ConvList { .. })),
+        "no ConvList: {frames:?}"
+    );
 }

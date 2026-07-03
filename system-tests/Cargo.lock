@@ -66,7 +66,7 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "daemon-api"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "ciborium",
@@ -80,7 +80,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-common"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "serde",
  "thiserror",
@@ -88,7 +88,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-protocol"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "ciborium",

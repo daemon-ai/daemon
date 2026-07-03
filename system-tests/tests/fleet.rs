@@ -49,6 +49,12 @@ fn gui_fleet_tree_and_control_wire_through() {
     // The Tree query + the Pause control op really crossed the socket (proxy trace).
     let frames = proxy.requests();
     let has = |pred: fn(&ApiRequest) -> bool| frames.iter().any(pred);
-    assert!(has(|r| matches!(r, ApiRequest::Tree)), "no Tree: {frames:?}");
-    assert!(has(|r| matches!(r, ApiRequest::Pause { .. })), "no Pause: {frames:?}");
+    assert!(
+        has(|r| matches!(r, ApiRequest::Tree { .. })),
+        "no Tree: {frames:?}"
+    );
+    assert!(
+        has(|r| matches!(r, ApiRequest::Pause { .. })),
+        "no Pause: {frames:?}"
+    );
 }

@@ -67,8 +67,8 @@ fn chat_approval_park_then_approve() {
     };
     let proxy = RecordingProxy::start(daemon.socket.clone()).expect("proxy starts");
 
-    let run = run_gui_hitl(&gui, &proxy.socket, "Write the note.", "approve", 60000)
-        .expect("gui runs");
+    let run =
+        run_gui_hitl(&gui, &proxy.socket, "Write the note.", "approve", 60000).expect("gui runs");
 
     assert!(
         frames_contain(&proxy, |r| matches!(r, ApiRequest::Submit { .. })),

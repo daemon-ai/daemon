@@ -22,7 +22,10 @@ fn daemon_starts_and_reports_ready() {
         return;
     }
     let daemon = Daemon::start().expect("daemon becomes ready");
-    assert!(daemon.socket.exists(), "the api socket should exist once ready");
+    assert!(
+        daemon.socket.exists(),
+        "the api socket should exist once ready"
+    );
 }
 
 #[test]

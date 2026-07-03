@@ -65,8 +65,20 @@ fn gui_fs_explorer_wires_through_to_workspace() {
     // And the typed frames really crossed the socket (proxy trace).
     let frames = proxy.requests();
     let has = |pred: fn(&ApiRequest) -> bool| frames.iter().any(pred);
-    assert!(has(|r| matches!(r, ApiRequest::FsRoots)), "no FsRoots: {frames:?}");
-    assert!(has(|r| matches!(r, ApiRequest::FsList { .. })), "no FsList: {frames:?}");
-    assert!(has(|r| matches!(r, ApiRequest::FsWrite { .. })), "no FsWrite: {frames:?}");
-    assert!(has(|r| matches!(r, ApiRequest::FsRead { .. })), "no FsRead: {frames:?}");
+    assert!(
+        has(|r| matches!(r, ApiRequest::FsRoots)),
+        "no FsRoots: {frames:?}"
+    );
+    assert!(
+        has(|r| matches!(r, ApiRequest::FsList { .. })),
+        "no FsList: {frames:?}"
+    );
+    assert!(
+        has(|r| matches!(r, ApiRequest::FsWrite { .. })),
+        "no FsWrite: {frames:?}"
+    );
+    assert!(
+        has(|r| matches!(r, ApiRequest::FsRead { .. })),
+        "no FsRead: {frames:?}"
+    );
 }
