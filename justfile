@@ -23,6 +23,10 @@ build-app:
 build-tui:
     nix build ./daemon-app#tui --out-link result-tui
 
+# Build the Qt WebAssembly GUI client (static browser artifacts, via its flake).
+build-wasm:
+    nix build ./daemon-app#wasm --out-link result-app-wasm
+
 # Build everything the E2E suite needs.
 build-all: build-node build-app build-tui
 
@@ -162,6 +166,17 @@ e2e-protocol: build-node
 # then remove the managed socket + pidfile, the app's QSettings/config + data + cache dirs, the
 # node's default data dir (sqlite store + auth db), and legacy $TMPDIR daemon-store leftovers.
 # Idempotent (exit 0 when there is nothing to clean). DRY_RUN=1 previews without killing/removing.
+#
+# Installed models are kept by default (they are big and re-downloadable). Opt in with:
+#   DEV_RESET_MODELS=1    also remove the daemon-owned model registry (daemon-catalog.json) and
+#                         quantize output (daemon-quantized/) from the hub cache the daemon
+#                         resolves, so the daemon reports a truly fresh (empty) installed catalog.
+#   DEV_RESET_MODELS=all  additionally remove the models--*/ artifact trees from that hub cache.
+#                         CAREFUL: the default hub (~/.cache/huggingface/hub) is shared with other
+#                         HF tooling - `all` deletes THEIR downloads too. The resolution mirrors
+#                         the daemon's (daemon-models cache.rs): DAEMON_MODELS__CACHE_DIR, else
+#                         HF_HUB_CACHE, else HF_HOME/hub, else XDG_CACHE_HOME/huggingface/hub,
+#                         else ~/.cache/huggingface/hub.
 dev-reset:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -242,6 +257,22 @@ dev-reset:
     remove "$tmp/daemon-api.sock"      # node standalone default socket
     if [ -n "${DAEMON_STORE_PATH:-}" ]; then
       remove "$DAEMON_STORE_PATH" "$DAEMON_STORE_PATH-wal" "$DAEMON_STORE_PATH-shm"
+    fi
+    # 3) Opt-in model-state reset (see the recipe doc above). Resolves the SAME hub cache dir the
+    #    daemon does, and by default touches only the daemon-owned files inside it.
+    models="${DEV_RESET_MODELS:-0}"
+    if [ "$models" = "1" ] || [ "$models" = "all" ]; then
+      if [ -n "${DAEMON_MODELS__CACHE_DIR:-}" ]; then hub="$DAEMON_MODELS__CACHE_DIR";
+      elif [ -n "${HF_HUB_CACHE:-}" ]; then hub="$HF_HUB_CACHE";
+      elif [ -n "${HF_HOME:-}" ]; then hub="$HF_HOME/hub";
+      else hub="$cache/huggingface/hub"; fi
+      note "model reset targets hub cache: $hub"
+      remove "$hub/daemon-catalog.json" "$hub/daemon-catalog.json.tmp" "$hub/daemon-quantized"
+      if [ "$models" = "all" ]; then
+        # The artifact trees are the standard shared HF layout - this also removes non-daemon
+        # downloads living in the same hub (documented above; that is what `all` means).
+        for m in "$hub"/models--*; do remove "$m"; done
+      fi
     fi
     if [ "$dry" != "1" ]; then
       for d in "${sock_dirs[@]}"; do rmdir "$d" 2>/dev/null || true; done

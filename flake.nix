@@ -167,6 +167,10 @@
 
         # The built children for the integration bundles.
         daemonBin = daemon-node.packages.${system}.daemon;
+        # The local-inference worker, built WITH the llama engine (the daemon-node default build is
+        # a stub worker with no engine at all — a bundle shipping that could download models but
+        # never run one). The daemon spawns it per session for llama.cpp profiles.
+        daemonInferLlama = daemon-node.packages.${system}.daemon-infer-llama;
         guiApp = daemon-app.packages.${system}.default;
         tuiApp = daemon-app.packages.${system}.tui;
 
@@ -178,17 +182,23 @@
         # connection + sessions + accounts + models + profiles + chat over the node). Bare dev
         # builds and the test harnesses keep the Mock default unless they opt in explicitly, so
         # in-repo offscreen-render / unit coverage is unaffected. A user override still wins.
+        #
+        # DAEMON_INFER__WORKER_BIN points the spawned daemon at the co-packaged llama-enabled
+        # daemon-infer (the daemon's own next-to-exe discovery cannot work here: DAEMON_BIN names
+        # the daemon package's store path, which contains no worker). The env layer wins over the
+        # config default, and an operator override of the variable still wins over ours.
         bundleWithDaemon =
           { app, name, mainProgram }:
           pkgs.symlinkJoin {
             inherit name;
-            paths = [ app daemonBin ];
+            paths = [ app daemonBin daemonInferLlama ];
             nativeBuildInputs = [ pkgs.makeWrapper ];
             postBuild = ''
               for client in daemon-app daemon-tui; do
                 if [ -e "$out/bin/$client" ]; then
                   wrapProgram "$out/bin/$client" \
                     --set-default DAEMON_BIN "${daemonBin}/bin/daemon" \
+                    --set-default DAEMON_INFER__WORKER_BIN "${daemonInferLlama}/bin/daemon-infer" \
                     --set-default DAEMON_APP_SERVICE_MODE "daemon" \
                     --set-default DAEMON_BUNDLE_VERSION "${bundleVersion}"
                 fi

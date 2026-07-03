@@ -1,8 +1,23 @@
 # AGENTS.md — daemon superproject
 
 Nix-managed monorepo. Two independent submodules: `daemon-node` (Rust backend) and
-`daemon-app` (Qt 6 QML + TUI client). All tooling lives in Nix devShells — there are NO host
-tools. Run everything via `just` (which wraps `nix develop`) or `nix develop --command ...`.
+`daemon-app` (Qt 6 GUI/TUI/WASM thin client). All tooling lives in Nix devShells — there are NO
+host tools. Run everything via `just` (which wraps `nix develop`) or `nix develop --command ...`.
+
+## Architecture invariant — the node decides, the apps render
+
+`daemon-node` is the single authority for domain state, business logic, validation, persistence,
+and orchestration. Every `daemon-app` surface (desktop GUI, TUI, WASM build) is a thin client of
+the same wire contract: it renders node state and sends intents, and never re-derives or forks
+domain behavior locally.
+
+Features land node-first: extend the Rust types + `daemon-api.cddl` in `daemon-node`, run
+`just update-codec`, then consume the new state from the app. If app code starts answering a
+domain question itself instead of presenting the node's answer, the API is missing a capability —
+add it to `daemon-node`. Inside `daemon-app`, UI is composed exclusively from the Daemon Kit
+(`DaemonApp.Controls`) + `DaemonApp.Theme`, and GUI + TUI render one shared C++ view-model
+layer — UI work that lands GUI-only without its TUI counterpart is incomplete (see
+`daemon-app/AGENTS.md`).
 
 ## Before you call any change "done"
 
