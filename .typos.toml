@@ -8,8 +8,10 @@ extend-exclude = [
   "**/target/**",
   "**/build*/**",
   "**/result-*/**",
-  "daemon-app/src/core/daemon/codec/generated/**",
-  "daemon-app/src/core/daemon/codec/vendor/**",
+  # `**/`-prefixed so they match whether typos walks from the superproject root or
+  # crosses into the daemon-app submodule (which resets paths to the submodule root).
+  "**/src/core/daemon/codec/generated/**",
+  "**/src/core/daemon/codec/vendor/**",
   "*.lock",
   # Intentional mangled text for pseudo-localization testing.
   "**/pseudolocalize.py",
