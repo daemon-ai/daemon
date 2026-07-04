@@ -152,6 +152,18 @@ package-portable:
 package-windows:
     nix build ".?submodules=1#package-nsis" --out-link result-package-windows
 
+# macOS DMG (deb/rpm/NSIS twin) with the node bundle embedded. Mac host only: the
+# DragNDrop generator shells out to hdiutil/codesign, and the attr is aarch64-darwin
+# only. No-ops on Linux so `package-*` calls stay portable.
+package-dmg:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ "$(uname -s)" != "Darwin" ]; then
+      echo "package-dmg: macOS host only (hdiutil/codesign); skipping on $(uname -s)" >&2
+      exit 0
+    fi
+    nix build ".?submodules=1#package-dmg" --accept-flake-config --out-link result-package-dmg
+
 # Everything packageable from this Linux host.
 package-all: package-linux package-portable package-windows
 

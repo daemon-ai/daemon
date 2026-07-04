@@ -299,6 +299,25 @@
           '';
         });
 
+        # macOS DMG (aarch64-darwin): the darwin twin of bundledLinuxArtifacts /
+        # bundledNsis. daemon-app's DragNDrop artifact with the node binaries
+        # appended to its cmakeFlags, so the DAEMON_APP_BUNDLED_* cache vars land
+        # daemon / daemon-cli / daemon-infer (the llama-enabled worker, matching
+        # the Linux bundle's component set) into Contents/MacOS next to the app
+        # executable - LocalDaemonLauncher discovers them there, no wrapper. Later
+        # -D wins, so appending fills the child's empty cache vars. The child's
+        # macos-dmg output is itself darwin-only (dynamic null attr name), so this
+        # is referenced only from the aarch64-darwin packages branch below; keeping
+        # it a lazy let binding means the Linux package set never forces it.
+        bundledDmg = daemon-app.packages.${system}.macos-dmg.overrideAttrs (old: {
+          pname = "daemon-bundled-macos-dmg";
+          cmakeFlags = old.cmakeFlags ++ [
+            "-DDAEMON_APP_BUNDLED_DAEMON=${daemonBin}/bin/daemon"
+            "-DDAEMON_APP_BUNDLED_DAEMON_INFER=${daemonInferLlama}/bin/daemon-infer"
+            "-DDAEMON_APP_BUNDLED_DAEMON_CLI=${daemonCli}/bin/daemon-cli"
+          ];
+        });
+
         # Portable bundle: the child's portable static-Qt layout plus the node binaries, rewired
         # exactly like the installer payloads (generic loader, $ORIGIN rpaths, runtime libs in
         # lib/), and its one-file tarball. This is the "unpack anywhere on x86_64 Linux" artifact;
@@ -526,6 +545,11 @@
           package-nsis = bundledNsis;
           package-portable = bundledPortable;
           package-portable-tarball = bundledPortableTarball;
+        }
+        # macOS DMG with the node bundle embedded, built on a mac host only
+        # (aarch64-darwin). `just package-dmg` / `nix build '.?submodules=1#package-dmg'`.
+        // lib.optionalAttrs (system == "aarch64-darwin") {
+          package-dmg = bundledDmg;
         };
 
         checks = {
