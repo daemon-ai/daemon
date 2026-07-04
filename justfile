@@ -132,6 +132,29 @@ verify-push: build-image
     echo "verify-push: OK - pipeline proven offline; recorded digest:"
     cat dist/hosted-node-digest.txt
 
+# --- packaging --------------------------------------------------------------
+# Shippable installers with the app+node bundle embedded (flake.nix bundle matrix): each target
+# that can carry the daemon does. Linux packages ship bin/{daemon-app,daemon,daemon-infer,
+# daemon-cli}; the NSIS installer ships daemon.exe + daemon-cli.exe (no daemon-infer.exe - the
+# llama worker has no MinGW cross build yet); the DMG fills the same contract on a mac host
+# (daemon-app/packaging/macos/README.md). APK/WASM stay thin remote clients by design.
+
+# Linux installers (deb + rpm + AppImage + zsync) with the node bundle embedded.
+package-linux:
+    nix build ".?submodules=1#package-linux" --out-link result-package-linux
+
+# The one-file portable bundle (unpack-anywhere tree + .tar.zst).
+package-portable:
+    nix build ".?submodules=1#package-portable" --out-link result-package-portable
+    nix build ".?submodules=1#package-portable-tarball" --out-link result-package-portable-tarball
+
+# Windows NSIS installer (cross-built; verify on real Windows - wine is unreliable here).
+package-windows:
+    nix build ".?submodules=1#package-nsis" --out-link result-package-windows
+
+# Everything packageable from this Linux host.
+package-all: package-linux package-portable package-windows
+
 # --- versioning -----------------------------------------------------------
 # Each repo owns its SemVer in a top-level VERSION file; the build systems enrich it with a git
 # build-metadata suffix (daemon-node/crates/contracts/daemon-common/build.rs and

@@ -2,7 +2,9 @@
   description = "daemon superproject: cross-repo codec sync + end-to-end integration";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    # logos-co fork of nixos-unstable: carries the MinGW Qt cross fixes the children's Windows
+    # outputs need. All three repos track the same fork so one nixpkgs eval backs the whole bundle.
+    nixpkgs.url = "github:logos-co/nixpkgs/mingw-integration";
     flake-utils.url = "github:numtide/flake-utils";
 
     # The two children, consumed ONLY by the integration `bundled-*` outputs below (the daemon
@@ -219,6 +221,116 @@
           mainProgram = "daemon-tui";
         };
 
+        # --- packaged installers: embed the app+node bundle in every target that supports it -----
+        # The child repo builds installer skeletons around the static-Qt app alone (its
+        # DAEMON_APP_BUNDLED_* cache vars stay empty - a standalone daemon-app checkout has no node
+        # binaries). This superproject is the layer that owns both children, so it injects the
+        # prebuilt node binaries by appending those cache vars to the child's artifact derivations:
+        #
+        #   deb / rpm / AppImage / portable  bin/{daemon-app,daemon,daemon-infer,daemon-cli} (+
+        #                                    lib/{libstdc++,libgomp} for the worker) - the packaging
+        #                                    pre-build script patchelfs every staged ELF for the
+        #                                    generic-distro floor
+        #   NSIS (Windows)                   bin\{daemon-app.exe,daemon.exe,daemon-cli.exe}; no
+        #                                    daemon-infer.exe (the llama engine worker has no MinGW
+        #                                    cross build - local inference on Windows is deferred)
+        #   DMG (macOS)                      same cache-var contract, filled on a mac host (needs
+        #                                    aarch64-darwin node builds; packaging/macos/README.md)
+        #   APK / WASM                       no embedding by design - thin remote clients; the wasm
+        #                                    "bundle" is the inversion below (hosted-node-oci)
+        #
+        # Co-location is the whole discovery story: LocalDaemonLauncher probes bin/daemon next to
+        # the app, the daemon's default worker_bin is a daemon-infer next to its own executable, and
+        # the app's service-mode default is already Daemon - so the installed tree needs no wrapper
+        # scripts and no environment.
+        daemonCli = daemon-node.packages.${system}.daemon-cli;
+
+        # The worker's engine runtime pair: daemon-infer-llama links libstdc++ + libgomp from the
+        # nix gcc; target distros may ship older GLIBCXX, so the packages carry their own copies in
+        # lib/ (the pre-build script rewrites bin rpaths to $ORIGIN/../lib).
+        bundledRuntimeLibs = [
+          "${pkgs.gcc.cc.lib}/lib/libstdc++.so.6"
+          "${pkgs.gcc.cc.lib}/lib/libgomp.so.1"
+        ];
+
+        nodeBundleFlags = [
+          "-DDAEMON_APP_BUNDLED_DAEMON=${daemonBin}/bin/daemon"
+          "-DDAEMON_APP_BUNDLED_DAEMON_INFER=${daemonInferLlama}/bin/daemon-infer"
+          "-DDAEMON_APP_BUNDLED_DAEMON_CLI=${daemonCli}/bin/daemon-cli"
+          "-DDAEMON_APP_BUNDLED_LIBS=${lib.concatStringsSep ";" bundledRuntimeLibs}"
+        ];
+
+        # Linux installers (deb / rpm / AppImage): the child's artifact build with the node
+        # binaries appended. Later -D wins, so appending to cmakeFlags fills the empty cache vars.
+        bundledLinuxArtifacts =
+          (daemon-app.packages.${system}.artifacts.overrideAttrs (old: {
+            pname = "daemon-bundled-linux-artifacts";
+            cmakeFlags = old.cmakeFlags ++ nodeBundleFlags;
+          }));
+
+        selectBundledArtifact =
+          name: glob:
+          pkgs.runCommand "daemon-bundled-${name}" { } ''
+            mkdir -p "$out"
+            cp -v ${bundledLinuxArtifacts}/${glob} "$out"/
+            cp -v ${bundledLinuxArtifacts}/${glob}.sha256 "$out"/ 2>/dev/null || true
+          '';
+
+        # Windows NSIS installer: daemon.exe + daemon-cli.exe cross-built by daemon-node's windows
+        # lane. The child's NSIS derivation re-runs cmake with extra -D flags at the end of its
+        # configurePhase, so the injection appends the same cache vars there.
+        daemonWindows = daemon-node.packages.${system}.daemon-windows;
+        daemonCliWindows = daemon-node.packages.${system}.daemon-cli-windows;
+        bundledNsis = daemon-app.packages.${system}.nsis.overrideAttrs (old: {
+          pname = "daemon-bundled-windows-nsis";
+          configurePhase = old.configurePhase + ''
+            cmake \
+              -DDAEMON_APP_BUNDLED_DAEMON=${daemonWindows}/bin/daemon.exe \
+              -DDAEMON_APP_BUNDLED_DAEMON_CLI=${daemonCliWindows}/bin/daemon-cli.exe \
+              .
+          '';
+        });
+
+        # Portable bundle: the child's portable static-Qt layout plus the node binaries, rewired
+        # exactly like the installer payloads (generic loader, $ORIGIN rpaths, runtime libs in
+        # lib/), and its one-file tarball. This is the "unpack anywhere on x86_64 Linux" artifact;
+        # glibc floor = max(app 2.38, daemon 2.39) - printed by the child's boot smoke and the
+        # release manifest.
+        appPortable = daemon-app.packages.${system}.portable;
+        bundledPortable = pkgs.runCommand "daemon-bundle-portable-${bundleVersion}" {
+          nativeBuildInputs = [ pkgs.patchelf ];
+        } ''
+          mkdir -p "$out/bin" "$out/lib"
+          cp -r ${appPortable}/share "$out/share"
+          cp ${appPortable}/bin/daemon-app "$out/bin/daemon-app"
+
+          install -m755 ${daemonBin}/bin/daemon "$out/bin/daemon"
+          install -m755 ${daemonInferLlama}/bin/daemon-infer "$out/bin/daemon-infer"
+          install -m755 ${daemonCli}/bin/daemon-cli "$out/bin/daemon-cli"
+          for so in ${lib.concatStringsSep " " bundledRuntimeLibs}; do
+            install -m755 "$so" "$out/lib/$(basename "$so")"
+          done
+
+          chmod -R u+w "$out/bin" "$out/lib"
+          for bin in "$out"/bin/*; do
+            patchelf --set-interpreter /lib64/ld-linux-x86-64.so.2 \
+                     --set-rpath '$ORIGIN:$ORIGIN/../lib' "$bin"
+          done
+          for so in "$out"/lib/*.so*; do
+            patchelf --set-rpath '$ORIGIN' "$so"
+          done
+        '';
+        bundledPortableTarball = pkgs.runCommand "daemon-bundle-portable-tarball-${baseVersion}" {
+          nativeBuildInputs = [ pkgs.zstd ];
+        } ''
+          mkdir -p "$out" staging/daemon-portable-x86_64
+          cp -r ${bundledPortable}/. staging/daemon-portable-x86_64/
+          tar -C staging \
+            --sort=name --owner=0 --group=0 --numeric-owner --mtime='@1' \
+            -cf - daemon-portable-x86_64 \
+            | zstd -19 -T0 -o "$out/daemon-portable-x86_64.tar.zst"
+        '';
+
         # --- hosted-node image (see docs/hosted-node-image.md) ----------------------------------
         # The daemon-node backend serving its own Qt WebAssembly GUI on ONE origin (static bundle +
         # authenticated CBOR-mux WebSocket on /ws, one listener), packaged as the OCI image a
@@ -394,6 +506,18 @@
           # bundle needs the emscripten pin).
           bundled-web = bundledWeb;
           hosted-node-oci = hostedNodeOci;
+
+          # Shippable installers with the app+node bundle embedded (see the bundle-matrix comment
+          # above; `just package-linux` / `package-windows` / `package-portable`). `package-*` =
+          # what a user downloads; the plain `bundled-*` outputs above stay the nix-native
+          # run-from-store form of the same product.
+          package-linux = bundledLinuxArtifacts;
+          package-appimage = selectBundledArtifact "appimage" "*.AppImage";
+          package-deb = selectBundledArtifact "deb" "*.deb";
+          package-rpm = selectBundledArtifact "rpm" "*.rpm";
+          package-nsis = bundledNsis;
+          package-portable = bundledPortable;
+          package-portable-tarball = bundledPortableTarball;
         };
 
         checks = {
