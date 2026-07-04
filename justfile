@@ -165,6 +165,50 @@ e2e-protocol: build-node
     export DAEMON_CLI_BIN="$PWD/daemon-node/target/debug/daemon-cli"
     cd system-tests && nix develop ../daemon-node --command cargo test --test protocol_trace -- --test-threads=1
 
+# --- wasm browser smoke / e2e ---------------------------------------------
+# Extra gates for wasm-touching changes (src/core/platform/wasm_*, the wasm shell, IDBFS/settings
+# persistence, browser file/clipboard flows). The browser comes from the daemon-app #wasm devShell's
+# bundled headless chromium (the host chromium is often a firejail wrapper that aborts under
+# --headless), surfaced to the harness via $CHROMIUM.
+
+# Boot-smoke the wasm bundle over CDP: assert the boot marker + WebGL2 renderer verdict.
+wasm-smoke: build-wasm
+    #!/usr/bin/env bash
+    set -euo pipefail
+    nix develop ./daemon-app#wasm --command \
+        bash daemon-app/scripts/wasm-boot-smoke.sh \
+            "$PWD/result-app-wasm/share/daemon-app/wasm"
+
+# Reload-survival browser e2e (scripts/wasm-boot-smoke.py --scenario reload): drive first-load ->
+# Page.reload and assert browser-origin state survives. `base` proves the reload + origin-storage
+# (localStorage + IDBFS) substrate with no daemon; `strict` self-boots a mock-provider daemon
+# serving a patched bundle copy and asserts the pinned sentinels (DAEMON_APP_AUTH resumed,
+# DAEMON_APP_CACHE rows>0 pre-fetch, DAEMON_APP_FIRSTRUN done). --seed-session drives daemon-cli to
+# create a durable session before load 1 so the client's first sync warms the cache -> IDBFS, making
+# load2's pre-fetch count non-vacuously >0. Set E2E_WEB_STRICT=0 to run base only (e.g. a host where
+# headless chromium boots but the node-side reload timing is unreliable; strict belongs in CI).
+#
+# Reload-survival browser e2e: base substrate + (default) strict sentinels with node-side seeding.
+e2e-web: build-node build-wasm
+    #!/usr/bin/env bash
+    set -euo pipefail
+    DAEMON_BIN="$PWD/daemon-node/target/debug/daemon"
+    DAEMON_CLI_BIN="$PWD/daemon-node/target/debug/daemon-cli"
+    WASM_DIR="$PWD/result-app-wasm/share/daemon-app/wasm"
+    # Base mode (proves reload + browser-storage survival, no daemon).
+    nix develop ./daemon-app#wasm --command \
+        python3 daemon-app/scripts/wasm-boot-smoke.py \
+            --scenario reload --mode base "$WASM_DIR"
+    # Strict mode (full re-auth / warm-cache / first-run sentinels + node-side seeding).
+    if [ "${E2E_WEB_STRICT:-1}" = "1" ]; then
+        nix develop ./daemon-app#wasm --command \
+            python3 daemon-app/scripts/wasm-boot-smoke.py \
+                --scenario reload --mode strict \
+                --daemon-bin "$DAEMON_BIN" --wasm-dir "$WASM_DIR" \
+                --seed-session --daemon-cli-bin "$DAEMON_CLI_BIN" \
+                --login e2e:e2e-passphrase
+    fi
+
 # --- dev-state reset --------------------------------------------------------
 
 # Reset all local daemon/app state so a verification run starts from a clean slate: stop the
