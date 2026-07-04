@@ -36,6 +36,12 @@ bundle:
     nix build ".?submodules=1#bundled-app" --out-link result-bundled-app
     nix build ".?submodules=1#bundled-tui" --out-link result-bundled-tui
 
+# Build the hosted-node OCI image: the daemon serving its own browser (WASM) GUI on one origin, as
+# the docker-archive a hosting provider ingests (docs/hosted-node-image.md). Submodule-aware.
+# Load + run locally: `podman load -i result-image`.
+build-image:
+    nix build ".?submodules=1#hosted-node-oci" --out-link result-image
+
 # --- versioning -----------------------------------------------------------
 # Each repo owns its SemVer in a top-level VERSION file; the build systems enrich it with a git
 # build-metadata suffix (daemon-node/crates/contracts/daemon-common/build.rs and

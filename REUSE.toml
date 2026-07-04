@@ -21,11 +21,14 @@ path = [
     ".gitmodules",
     ".env",
     ".typos.toml",
+    ".cursor/mcp.json",
+    "VERSION",
     "daemon.code-workspace",
     "system-tests/Cargo.toml",
     "system-tests/Cargo.lock",
     "scripts/**",
     "user-stories/**",
+    "docs/**",
     ".github/**",
 ]
 SPDX-FileCopyrightText = "2026 Jarrad Hope"

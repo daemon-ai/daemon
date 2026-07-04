@@ -219,6 +219,121 @@
           mainProgram = "daemon-tui";
         };
 
+        # --- hosted-node image (see docs/hosted-node-image.md) ----------------------------------
+        # The daemon-node backend serving its own Qt WebAssembly GUI on ONE origin (static bundle +
+        # authenticated CBOR-mux WebSocket on /ws, one listener), packaged as the OCI image a
+        # microVM-based hosting provider ingests (hosted-nodes spec D4/§8.1: Fly Machines /
+        # Firecracker take an OCI registry ref; `node_versions.image_ref` pins its digest).
+        # Run locally:
+        #   podman load -i result-image
+        #   podman run -d -p 8080:8080 -v hosted-node-data:/data \
+        #     -e DAEMON_ADMIN_USERNAME=operator -e DAEMON_ADMIN_PASSWORD=... \
+        #     localhost/daemon-hosted-node:<tag>       # then open http://127.0.0.1:8080/
+        #
+        # The wasm bundle already ships .br/.gz siblings (daemon-app's postInstall; the web front
+        # scans them at boot and negotiates Accept-Encoding), so this repack's only job is
+        # `unsafeDiscardReferences`: daemon-app.wasm embeds the qtbase-wasm store path as a dead
+        # string constant (a compiled-in Qt prefix), which would otherwise chain the multi-GiB
+        # Qt-for-WASM *build* closure into the image (measured: 1.7 GB / 97 layers with the
+        # reference, ~0.1 GB / 16 layers without). The artifact is served byte-identical to
+        # browsers (which have no /nix/store), so the reference is provably unused at runtime.
+        wasmBundle = daemon-app.packages.${system}.wasm;
+        webRootDir = "share/daemon-app/wasm";
+        webBundle =
+          pkgs.runCommand "daemon-web-root"
+            {
+              __structuredAttrs = true;
+              unsafeDiscardReferences.out = true;
+            }
+            ''
+              mkdir -p "$out/${webRootDir}"
+              cp ${wasmBundle}/${webRootDir}/* "$out/${webRootDir}/"
+            '';
+        webRoot = "${webBundle}/${webRootDir}";
+
+        webPort = "8080"; # hosted-nodes spec §7.3: the provider edge proxies to internal_port 8080
+
+        # The hosted-node launcher, mirroring bundleWithDaemon's --set-default discipline: every
+        # value is a default an operator/provider env override still wins over (`''${VAR:-default}`),
+        # and the daemon is exec'd so it is PID 1 and receives the runtime's stop signal directly
+        # (SIGTERM and SIGINT both trip its graceful shutdown).
+        hostedNodeLauncher = pkgs.writeShellApplication {
+          name = "hosted-node";
+          runtimeInputs = [ pkgs.coreutils ]; # mkdir -p in an otherwise-distroless container
+          text = ''
+            # Single-origin web front. TLS terminates at the provider edge; the public https
+            # origin(s) must be added to DAEMON_API__WS_ALLOWED_ORIGINS by the provisioner (the
+            # derived self-origin is http://<Host>).
+            export DAEMON_WEB__ADDR="''${DAEMON_WEB__ADDR:-0.0.0.0:${webPort}}"
+            export DAEMON_WEB__ROOT="''${DAEMON_WEB__ROOT:-${webRoot}}"
+
+            # Durable state on the provider volume: sqlite store, auth db, blob CAS and workspaces
+            # all root under DAEMON_DATA_DIR. The Unix socket lives under the data dir too - a
+            # container image has no /tmp guarantee (the daemon's default) and the socket is
+            # node-local.
+            export DAEMON_DATA_DIR="''${DAEMON_DATA_DIR:-/data}"
+            export DAEMON_STORE="''${DAEMON_STORE:-sqlite}"
+            export DAEMON_SOCKET_PATH="''${DAEMON_SOCKET_PATH:-$DAEMON_DATA_DIR/daemon-api.sock}"
+
+            # The daemon boots HOME-less since the hosted-boot hardening, but root HOME on the
+            # volume anyway so anything home-derived (e.g. the hub-cache fallback) is durable.
+            export HOME="''${HOME:-$DAEMON_DATA_DIR/home}"
+
+            # Outbound TLS trust for the in-process genai client (Daemon Cloud attach / BYOK):
+            # pin the store CA bundle unless the operator supplies one.
+            export SSL_CERT_FILE="''${SSL_CERT_FILE:-${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt}"
+
+            mkdir -p "$DAEMON_DATA_DIR" "$HOME"
+            exec ${daemonBin}/bin/daemon "$@"
+          '';
+        };
+
+        # The image root, also host-runnable (bin/hosted-node) and the microvm.nix seam. Unlike
+        # bundleWithDaemon this deliberately EXCLUDES daemon-infer-llama: hosted plans forbid local
+        # inference (it routes through Daemon Cloud attach or BYOK, both served by the in-process
+        # genai client), and the llama-enabled worker would roughly double the image for a code
+        # path disabled by config. Re-inclusion is one line: add daemonInferLlama to paths + a
+        # DAEMON_INFER__WORKER_BIN default in the launcher.
+        bundledWeb = pkgs.buildEnv {
+          name = "daemon-web-bundled";
+          paths = [
+            hostedNodeLauncher
+            daemonBin
+            webBundle
+          ];
+        };
+
+        # A layered image so the fat, slow-moving layers (glibc, the wasm bundle) are shared across
+        # daemon-version pushes; the registry digest is the immutable ref the hosted-nodes control
+        # plane pins. OCI tags forbid `+`, so the SemVer build-metadata separator becomes `_` in
+        # the tag; the raw bundleVersion rides in the version label. No StopSignal override: the
+        # runtime-default SIGTERM trips the daemon's graceful shutdown since the hosted-boot
+        # hardening.
+        hostedNodeOci = pkgs.dockerTools.buildLayeredImage {
+          name = "daemon-hosted-node";
+          tag = lib.replaceStrings [ "+" ] [ "_" ] bundleVersion;
+          contents = [ bundledWeb ];
+          # /data is the provider volume mountpoint; /tmp for anything std::env::temp_dir-shaped;
+          # /opt/daemon/web is the spec's fixed bundle path, so a provisioner-injected
+          # DAEMON_WEB__ROOT=/opt/daemon/web resolves to the same bundle the launcher defaults to
+          # by store path.
+          fakeRootCommands = ''
+            mkdir -p ./data ./tmp ./opt/daemon
+            chmod 1777 ./tmp
+            ln -s ${webRoot} ./opt/daemon/web
+          '';
+          config = {
+            Entrypoint = [ "/bin/hosted-node" ];
+            ExposedPorts."${webPort}/tcp" = { };
+            Volumes."/data" = { };
+            Labels = {
+              "org.opencontainers.image.version" = bundleVersion;
+              "ai.daemon.role" = "hosted-node";
+              "ai.daemon.web-port" = webPort;
+            };
+          };
+        };
+
         # Where the canonical codegen script + the single authoritative CDDL live in daemon-node.
         codegenScript = ./daemon-node/crates/contracts/daemon-api/zcbor-codegen.sh;
         apiCddl = ./daemon-node/crates/contracts/daemon-api/daemon-api.cddl;
@@ -270,6 +385,15 @@
           # `nix build '.?submodules=1#bundled-app'`, run with `nix run '.?submodules=1#bundled-app'`.
           bundled-app = bundledApp;
           bundled-tui = bundledTui;
+
+          # The hosted-node deployment artifacts (CON-1b's web sibling; docs/hosted-node-image.md):
+          # the daemon serving its own browser (WASM) GUI on one origin. `bundled-web` is the
+          # host-runnable root; `hosted-node-oci` is the OCI image a hosting provider ingests
+          # (docker-archive tarball; `podman load -i result-image`). Build with `just build-image`
+          # or `nix build '.?submodules=1#hosted-node-oci'`. Linux-only in practice (the wasm
+          # bundle needs the emscripten pin).
+          bundled-web = bundledWeb;
+          hosted-node-oci = hostedNodeOci;
         };
 
         checks = {
@@ -310,6 +434,16 @@
             type = "app";
             program = "${bundledTui}/bin/daemon-tui";
             meta.description = "Run the daemon-tui client bundled with the daemon host binary";
+          };
+
+          # Host-local smoke run of the hosted-node launcher (the exact entrypoint the OCI image
+          # boots), e.g.:
+          #   DAEMON_WEB__ADDR=127.0.0.1:8080 DAEMON_DATA_DIR=/tmp/hosted-node \
+          #     nix run '.?submodules=1#bundled-web'
+          bundled-web = {
+            type = "app";
+            program = "${bundledWeb}/bin/hosted-node";
+            meta.description = "Run the daemon serving its browser GUI on one origin (hosted-node launcher)";
           };
 
           # The one impure step: copy the pure codegen output into the working tree. Nix never mutates
