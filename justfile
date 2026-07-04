@@ -155,6 +155,59 @@ package-windows:
 # Everything packageable from this Linux host.
 package-all: package-linux package-portable package-windows
 
+# --- cache seeding (daemon-ai.cachix.org) ---------------------------------
+# Build (reusing the local store) and push the heavy release + toolchain closures to the daemon-ai
+# Cachix cache so CI and other machines pull them instead of rebuilding. The write token is read
+# from .env (CACHIX_KEY -> CACHIX_AUTH_TOKEN, the variable the cachix CLI expects) and never
+# printed. Submodule-aware attrs use `.?submodules=1#...`; the daemon-app-only attrs (apk / wasm /
+# the static-Qt build stacks) build straight from ./daemon-app. Also pushes the daemon-node and
+# daemon-app devShell closures so CI's `nix develop` pulls instead of rebuilding.
+cache-push:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -f .env ] || { echo "cache-push: .env not found (needs CACHIX_KEY)" >&2; exit 1; }
+    set -a; . ./.env; set +a
+    : "${CACHIX_KEY:?cache-push: CACHIX_KEY missing from .env}"
+    export CACHIX_AUTH_TOKEN="$CACHIX_KEY"
+
+    # Superproject bundle/installer + integration outputs (submodule-aware).
+    super_attrs=(
+      ".?submodules=1#package-linux"
+      ".?submodules=1#package-portable-tarball"
+      ".?submodules=1#package-nsis"
+      ".?submodules=1#bundled-app"
+      ".?submodules=1#bundled-tui"
+    )
+    # daemon-app thin-client artifacts + the expensive static-Qt build closures (pushed directly:
+    # the installers' runtime closures do NOT carry these build-time Qt stacks).
+    app_attrs=(
+      "./daemon-app#apk"
+      "./daemon-app#wasm"
+      "./daemon-app#qt-linux-static"
+      "./daemon-app#qt-mingw-static"
+      "./daemon-app#qt-android"
+      "./daemon-app#qt-wasm"
+    )
+
+    paths=()
+    for a in "${super_attrs[@]}" "${app_attrs[@]}"; do
+      echo "cache-push: building $a" >&2
+      while IFS= read -r p; do [ -n "$p" ] && paths+=("$p"); done \
+        < <(nix build --print-out-paths --no-link "$a")
+    done
+
+    # devShell closures (so CI's `nix develop` pulls instead of rebuilding).
+    for flake in ./daemon-node ./daemon-app; do
+      prof="$(mktemp -u /tmp/daemon-cache-profile.XXXXXX)"
+      echo "cache-push: realizing devShell $flake" >&2
+      nix develop "$flake" --profile "$prof" --command true
+      paths+=("$(readlink -f "$prof")")
+      rm -f "$prof"
+    done
+
+    echo "cache-push: pushing ${#paths[@]} store path(s) (with closures) to daemon-ai" >&2
+    printf '%s\n' "${paths[@]}" | nix run nixpkgs#cachix -- push daemon-ai
+
 # --- versioning -----------------------------------------------------------
 # Each repo owns its SemVer in a top-level VERSION file; the build systems enrich it with a git
 # build-metadata suffix (daemon-node/crates/contracts/daemon-common/build.rs and

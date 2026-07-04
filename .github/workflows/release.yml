@@ -1,0 +1,242 @@
+name: release
+
+# Tag-triggered release pipeline: build every currently-buildable installer, sign the update feed
+# with minisign, and publish everything to GitHub Releases. `just release .` (scripts/release.sh)
+# cuts the annotated `vX.Y.Z` tag that fires this. workflow_dispatch runs the same build + manifest
+# generation for validation but skips the GitHub Release creation (no tag to publish against).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Linux installers (deb / rpm / AppImage + sidecars) and the portable .tar.zst, app+node bundle
+  # embedded (superproject package-linux / package-portable-tarball).
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: false
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: cachix/cachix-action@v15
+        with:
+          name: daemon-ai
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: Build Linux installers + portable tarball
+        run: |
+          nix build ".?submodules=1#package-linux" --out-link result-linux -L --accept-flake-config
+          nix build ".?submodules=1#package-portable-tarball" --out-link result-portable -L --accept-flake-config
+      - name: Stage dist/
+        run: |
+          set -euo pipefail
+          version="$(cat VERSION)"
+          mkdir -p dist
+          # deb / rpm / AppImage keep their CPack names (their .sha256/.zsync sidecars reference
+          # those exact names — renaming would invalidate them). Copy the whole output so ALL
+          # sidecars (.sha256, .zsync, and .glibc if a build ever emits one) come along.
+          cp -vL result-linux/* dist/
+          # The portable tarball is unversioned in-store; give it a versioned name (no sidecar to
+          # invalidate). Keeps the x86_64 token so release-manifest.sh records arch correctly.
+          cp -vL result-portable/daemon-portable-x86_64.tar.zst \
+            "dist/daemon-portable-${version}-x86_64.tar.zst"
+          ls -la dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/
+          if-no-files-found: error
+
+  # Windows NSIS installer (MinGW cross; no Windows runner needed).
+  windows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: false
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: cachix/cachix-action@v15
+        with:
+          name: daemon-ai
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: Build Windows NSIS installer
+        run: nix build ".?submodules=1#package-nsis" --out-link result-nsis -L --accept-flake-config
+      - name: Stage dist/
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # CPack names the installer daemon-<ver>-win64.exe; keep it (its .sha256 sidecar, if
+          # present, references that name).
+          cp -vL result-nsis/daemon-*-win64.exe dist/
+          cp -vL result-nsis/daemon-*-win64.exe.sha256 dist/ 2>/dev/null || true
+          ls -la dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/
+          if-no-files-found: error
+
+  # Thin mobile/web clients: the debug-signed APK (arm64-v8a) and the WASM browser bundle.
+  android-wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: false
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: cachix/cachix-action@v15
+        with:
+          name: daemon-ai
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: Build APK + WASM bundle
+        run: |
+          nix build "./daemon-app#apk" --out-link result-apk -L --accept-flake-config
+          nix build "./daemon-app#wasm" --out-link result-wasm -L --accept-flake-config
+      - name: Stage dist/
+        run: |
+          set -euo pipefail
+          version="$(cat VERSION)"
+          mkdir -p dist
+          # The APK is debug-signed by design (ephemeral keystore; daemon-app/nix/android.nix).
+          # Keep the arm64-v8a token so release-manifest.sh records arch=aarch64 rather than unknown.
+          cp -vL result-apk/*.apk "dist/daemon-app-${version}-android-arm64-v8a-debug.apk"
+          # WASM is delivered by the browser (update dial = None), so it ships as a downloadable
+          # release asset but release-manifest.sh deliberately excludes any *-wasm.tar.* from the
+          # feed (see its classify()). .tar.gz keeps it plainly a source-of-truth archive.
+          tar -C result-wasm/share/daemon-app/wasm -czf "dist/daemon-app-${version}-wasm.tar.gz" .
+          ls -la dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-wasm
+          path: dist/
+          if-no-files-found: error
+
+  # macOS DMG — DISABLED by default. Blocked on M2/M3 landing aarch64-darwin node builds + a
+  # superproject package-dmg selector. To enable: set the repo variable ENABLE_MACOS_RELEASE=true,
+  # pick a runner (GH-hosted macos-14 or the M1 mini as a self-hosted runner), build package-dmg,
+  # stage the .dmg + .sha256, and add `macos` to the publish job's `needs`. (A repo-var gate rather
+  # than a literal `if: false` keeps actionlint clean and makes the toggle a settings change.)
+  # TODO(macos): enable once package-dmg is exposed.
+  macos:
+    if: ${{ vars.ENABLE_MACOS_RELEASE == 'true' }}
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: cachix/cachix-action@v15
+        with:
+          name: daemon-ai
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: Build macOS DMG (not wired yet)
+        run: |
+          echo "macOS packaging is not wired yet (needs package-dmg on the superproject)." >&2
+          exit 1
+
+  # Assemble every artifact, generate + sign the update feed, and publish the GitHub Release.
+  publish:
+    needs: [linux, windows, android-wasm]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: cachix/cachix-action@v15
+        with:
+          name: daemon-ai
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: Download all build artifacts into dist/
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Verify tag matches VERSION
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          # scripts/release.sh cuts strictly `vX.Y.Z` tags (VERSION is SemVer core). A manually cut
+          # prerelease tag (e.g. v0.0.2-rc.1) is allowed: strip the prerelease suffix before
+          # comparing its core to VERSION.
+          tag_core="${GITHUB_REF_NAME#v}"
+          tag_core="${tag_core%%-*}"
+          file_version="$(cat VERSION)"
+          if [ "$tag_core" != "$file_version" ]; then
+            echo "tag core ($tag_core) does not match VERSION ($file_version)" >&2
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} matches VERSION ${file_version}"
+      - name: Generate + sign the release feed (manifest.json) and SHA256SUMS
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          version="$(cat VERSION)"
+          notes_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}"
+          # Materialize the signing key with a private umask; never printed.
+          umask 077
+          keyfile="${RUNNER_TEMP}/minisign.key"
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$keyfile"
+          export MINISIGN_SECRET_KEY_FILE="$keyfile"
+          # jq + minisign from nixpkgs; coreutils (sha256sum/stat/date) also present on the runner.
+          nix shell nixpkgs#jq nixpkgs#minisign nixpkgs#coreutils --command \
+            bash daemon-app/scripts/release-manifest.sh dist "$version" stable \
+              --notes-url "$notes_url"
+          rm -f "$keyfile"
+          # Checksums over everything staged (manifest + .minisig included; SHA256SUMS itself is
+          # written after the glob is expanded, so it is not listed in its own file).
+          ( cd dist && sha256sum -- * > ../SHA256SUMS && mv ../SHA256SUMS ./SHA256SUMS )
+          ls -la dist/
+      - name: Create GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Prerelease when the tag carries a SemVer prerelease suffix (contains a '-').
+          prerelease=()
+          case "${GITHUB_REF_NAME}" in
+            *-*) prerelease=(--prerelease) ;;
+          esac
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --verify-tag \
+            --title "daemon ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            "${prerelease[@]}"

@@ -1,6 +1,14 @@
 {
   description = "daemon superproject: cross-repo codec sync + end-to-end integration";
 
+  # Pull built closures from the daemon-ai Cachix cache (public pull). CI feeds the cache
+  # deterministically via cachix-action; humans/other machines opt in with --accept-flake-config
+  # (or by being a trusted-user). Public pull key only — no secret lives here.
+  nixConfig = {
+    extra-substituters = [ "https://daemon-ai.cachix.org" ];
+    extra-trusted-public-keys = [ "daemon-ai.cachix.org-1:jzeLmFDfgE5dzGT0RXF70IEU/tKsWdDV9LQ5zPGAnQs=" ];
+  };
+
   inputs = {
     # logos-co fork of nixos-unstable: carries the MinGW Qt cross fixes the children's Windows
     # outputs need. All three repos track the same fork so one nixpkgs eval backs the whole bundle.
