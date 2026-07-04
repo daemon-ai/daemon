@@ -42,6 +42,96 @@ bundle:
 build-image:
     nix build ".?submodules=1#hosted-node-oci" --out-link result-image
 
+# --- publishing (hosted-node image; docs/hosted-node-image.md §5) ---------
+# Push the built OCI docker-archive to a registry and record the immutable DIGEST that
+# node_versions.image_ref pins (tags are labels; the digest is the contract - hosted-nodes spec
+# §8.1.5). Registry/repo are parameterized (no personal accounts baked in); IMAGE_ORG has no
+# default and MUST be set explicitly. Credentials come from the environment only, never stored:
+#   REGISTRY_USER + REGISTRY_PASSWORD   -> skopeo --dest-creds / --creds
+#   REGISTRY_AUTH_FILE                  -> skopeo --authfile (e.g. a prior `skopeo login` / CI)
+# skopeo + jq come from the superproject devShell (`nix develop`).
+REGISTRY := env_var_or_default("REGISTRY", "ghcr.io")
+IMAGE_ORG := env_var_or_default("IMAGE_ORG", "")
+IMAGE_NAME := env_var_or_default("IMAGE_NAME", "daemon-hosted-node")
+
+# Build (if needed) then push result-image and record the pinnable digest to stdout + a file.
+# Usage:  just push-image IMAGE_ORG=daemon-ai
+# Env:    CHANNEL=canary appends a `-canary` tag suffix (same repo; digest is the contract, so
+#         promotion is a node_versions DB action, no re-push). REGISTRY_INSECURE=1 targets a
+#         plain-HTTP registry (localhost dry-run; see `verify-push`).
+push-image: build-image
+    #!/usr/bin/env bash
+    set -euo pipefail
+    org="{{IMAGE_ORG}}"
+    if [ -z "$org" ]; then
+      echo "error: set IMAGE_ORG (expected production value: daemon-ai once the GitHub org is confirmed)" >&2
+      echo "usage: just push-image IMAGE_ORG=daemon-ai" >&2
+      exit 1
+    fi
+    repo="{{REGISTRY}}/${org}/{{IMAGE_NAME}}"
+    # skopeo needs a trust policy; nixpkgs ships none and a NixOS host has no
+    # /etc/containers/policy.json (same caveat as podman - hosted-node-image.md §4). Honour an
+    # explicit SKOPEO_POLICY, else an existing system/user policy, else synthesize the standard
+    # accept-all default (Docker's own default) in a temp file.
+    policy=()
+    if [ -n "${SKOPEO_POLICY:-}" ]; then
+      policy=(--policy "$SKOPEO_POLICY")
+    elif [ ! -e "${HOME:-/root}/.config/containers/policy.json" ] && [ ! -e /etc/containers/policy.json ]; then
+      pf="$(mktemp)"; trap 'rm -f "$pf"' EXIT
+      printf '{"default":[{"type":"insecureAcceptAnything"}]}\n' > "$pf"
+      policy=(--policy "$pf")
+    fi
+    # Tag = the bundle version label (skopeo surfaces it reliably; a docker-archive's RepoTags are
+    # not), with SemVer build-metadata '+' -> '_' exactly as the flake stamps the OCI tag.
+    ver="$(skopeo "${policy[@]}" inspect docker-archive:result-image \
+      | jq -r '.Labels["org.opencontainers.image.version"]')"
+    base_tag="${ver//+/_}"
+    tag="${base_tag}${CHANNEL:+-$CHANNEL}"
+    dest="docker://${repo}:${tag}"
+    # Auth + TLS flags built from the env only (nothing is written into the tree).
+    copy_auth=(); inspect_auth=()
+    if [ -n "${REGISTRY_AUTH_FILE:-}" ]; then
+      copy_auth+=(--authfile "$REGISTRY_AUTH_FILE"); inspect_auth+=(--authfile "$REGISTRY_AUTH_FILE")
+    fi
+    if [ -n "${REGISTRY_USER:-}" ] && [ -n "${REGISTRY_PASSWORD:-}" ]; then
+      copy_auth+=(--dest-creds "${REGISTRY_USER}:${REGISTRY_PASSWORD}")
+      inspect_auth+=(--creds "${REGISTRY_USER}:${REGISTRY_PASSWORD}")
+    fi
+    copy_tls=(); inspect_tls=()
+    if [ "${REGISTRY_INSECURE:-0}" = "1" ]; then
+      copy_tls=(--dest-tls-verify=false); inspect_tls=(--tls-verify=false)
+    fi
+    echo "push-image: copying result-image -> ${dest}"
+    skopeo "${policy[@]}" copy "${copy_auth[@]}" "${copy_tls[@]}" docker-archive:result-image "${dest}"
+    # Read the registry manifest digest back. Uses `jq -r .Digest` rather than skopeo's Go-template
+    # --format, whose double-brace syntax collides with just's own interpolation inside recipes.
+    digest="$(skopeo "${policy[@]}" inspect "${inspect_auth[@]}" "${inspect_tls[@]}" "${dest}" | jq -r '.Digest')"
+    ref="${repo}@${digest}"
+    mkdir -p dist
+    printf '%s\n' "$ref" > dist/hosted-node-digest.txt
+    echo "push-image: pushed  ${repo}:${tag}"
+    echo "push-image: image_ref = ${ref}"
+    echo "push-image: recorded -> dist/hosted-node-digest.txt   (paste into node_versions API as image_ref)"
+
+# Offline dry-run: prove the whole push->digest pipeline with no real registry and no credentials.
+# Spins up a throwaway `registry:2` on 127.0.0.1:5000 under rootless podman, runs push-image
+# against it insecurely, prints the recorded digest, then tears the registry down. If podman is
+# unavailable, the docs describe the zero-dependency `oci:` layout fallback. NOTE the digest from a
+# dry-run is a pipeline proof only - the real node_versions value comes from the production push.
+verify-push: build-image
+    #!/usr/bin/env bash
+    set -euo pipefail
+    port=5000; name=hosted-node-registry-dryrun
+    podman run -d --rm --name "$name" -p "127.0.0.1:${port}:5000" docker.io/library/registry:2 >/dev/null
+    trap 'podman stop "$name" >/dev/null 2>&1 || true' EXIT
+    for _ in $(seq 50); do
+      curl -fsS "http://127.0.0.1:${port}/v2/" >/dev/null 2>&1 && break
+      sleep 0.2
+    done
+    REGISTRY_INSECURE=1 just REGISTRY="127.0.0.1:${port}" IMAGE_ORG=dryrun push-image
+    echo "verify-push: OK - pipeline proven offline; recorded digest:"
+    cat dist/hosted-node-digest.txt
+
 # --- versioning -----------------------------------------------------------
 # Each repo owns its SemVer in a top-level VERSION file; the build systems enrich it with a git
 # build-metadata suffix (daemon-node/crates/contracts/daemon-common/build.rs and

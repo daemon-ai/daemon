@@ -527,7 +527,14 @@
         # tools, so the task runner must come from the flake too. Enter with `nix develop` (the
         # superproject build outputs still need `?submodules=1`, but this shell does not).
         devShells.default = pkgs.mkShell {
-          packages = [ pkgs.just ];
+          # `just` runs every task; skopeo + jq are for the hosted-node image publish path
+          # (`just push-image` / `verify-push`, docs/hosted-node-image.md §5) - pinned here so the
+          # push pipeline uses the same versions everywhere rather than an ambient host skopeo.
+          packages = [
+            pkgs.just
+            pkgs.skopeo
+            pkgs.jq
+          ];
         };
 
         # Opt-in code-review / tech-debt tooling. Entered explicitly (`nix develop .#review`, or via

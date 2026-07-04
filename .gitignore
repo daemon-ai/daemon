@@ -3,6 +3,9 @@
 target/
 *.rs.bk
 
+# Publish artifacts (recorded image digest, oci: layout dry-runs); never committed.
+/dist/
+
 # E2E artifacts (logs, screenshots, terminal dumps, protocol traces)
 /system-tests/artifacts/
 

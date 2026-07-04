@@ -223,17 +223,92 @@ $ time podman stop hosted-node-smoke      # sub-second
 
 ---
 
-## 5. Publishing (D4's second half, not wired here)
+## 5. Publishing (D4's second half — as-built runbook)
 
-Push the docker-archive with skopeo and record the *digest*, e.g.
-`skopeo copy docker-archive:result-image docker://registry.example/daemon-hosted-node:vX.Y.Z`
-then `skopeo inspect --format '{{.Digest}}' …` — that digest string is what
-`node_versions.image_ref` pins (§8.1.5). Tags are labels; digests are the contract.
-The registry choice, digest recording into `node_versions`, and a canary channel are
-daemon-repo CI work the spec assigns to D4.
+`just push-image` pushes the docker-archive (`result-image`) to a registry with **skopeo**
+and records the immutable **digest** that `node_versions.image_ref` pins. Tags are labels;
+the digest is the contract (§8.1.5). skopeo and jq are pinned in the superproject devShell
+(`nix develop`), so the pipeline uses the same versions everywhere.
 
-The wasm build currently only works on `x86_64-linux`/`aarch64-linux` hosts with the
-emscripten pin; the image is Linux-only in practice (see also Q9 below on architectures).
+### Registry
+
+- **Primary: GitHub Container Registry — `ghcr.io/<org>/daemon-hosted-node`.** The repo is on
+  GitHub and CI is GitHub Actions, so in CI the built-in `GITHUB_TOKEN` (with `packages: write`)
+  authenticates a push — no separate secret to provision. GHCR gives OCI manifest digests and
+  shares fat layers (glibc, WASM bundle) across daemon-version pushes, so fleet rollout pulls
+  move only the daemon-binary layer (§16).
+- **Fallback: `registry.fly.io/<app>`.** The compute provider is Fly Machines, which can pull
+  from its own registry with no cross-registry credential (`fly auth docker` → an authfile). Use
+  this only if GHCR pull-auth from Fly ever proves awkward; it couples the image to a Fly app
+  namespace.
+
+Repo = `${REGISTRY}/${IMAGE_ORG}/${IMAGE_NAME}`. All three are overridable
+(`REGISTRY=ghcr.io`, `IMAGE_NAME=daemon-hosted-node` by default); **`IMAGE_ORG` has no default
+and must be set explicitly** — the recipe fails fast otherwise (the expected production value is
+`daemon-ai`, once that GitHub org is confirmed). The tag is derived from the image's
+`org.opencontainers.image.version` label with `+`→`_` — the exact scheme the flake stamps the
+OCI tag with — so the pushed tag always matches what nix chose.
+
+### Credentials (env only, never stored)
+
+Supply exactly one of:
+
+- `REGISTRY_USER` + `REGISTRY_PASSWORD` (e.g. a GHCR PAT with `write:packages`) → skopeo
+  `--dest-creds` / `--creds`; or
+- `REGISTRY_AUTH_FILE` pointing at a file from a prior out-of-band `skopeo login` / CI token →
+  skopeo `--authfile`.
+
+Credentials live only in the process environment (or an authfile outside the repo). Nothing is
+written into the tree; `.env` and `/dist/` are git-ignored.
+
+### Operator flow
+
+```console
+$ nix develop                                    # skopeo + jq + just on PATH
+$ just build-image                               # -> result-image (or reuse an existing one)
+$ export REGISTRY_USER=<you> REGISTRY_PASSWORD=<ghcr-pat>
+$ just push-image IMAGE_ORG=daemon-ai            # push + read digest back
+push-image: copying result-image -> docker://ghcr.io/daemon-ai/daemon-hosted-node:0.0.1_g<rev>
+push-image: pushed  ghcr.io/daemon-ai/daemon-hosted-node:0.0.1_g<rev>
+push-image: image_ref = ghcr.io/daemon-ai/daemon-hosted-node@sha256:<digest>
+push-image: recorded -> dist/hosted-node-digest.txt   (paste into node_versions API as image_ref)
+```
+
+Then, on the daemon-api (hosting admin) side, **paste that `…@sha256:…` ref into the
+`node_versions` API as `image_ref`** — create a row with `channel` `stable` (or `canary`, below),
+`wire_version` admin-entered (§16), and roll it out. `node_versions` pins the digest, never the
+tag, so a moved/overwritten tag can never repoint a fleet.
+
+**Canary:** `just push-image CHANNEL=canary IMAGE_ORG=daemon-ai` pushes a `…-canary` tag to the
+*same* repo — the digest is identical in kind and channel is just a `node_versions` column, so
+promotion `canary`→`stable` is a DB action with no re-push.
+
+### Dry-run verification (no registry, no credentials)
+
+`just verify-push` spins up a throwaway `registry:2` on `127.0.0.1:5000` under rootless podman,
+runs the exact `push-image` path against it insecurely (`REGISTRY_INSECURE=1`), and prints the
+recorded digest — proving the push→digest pipeline offline. The dry-run digest is a *pipeline*
+proof only: the real `node_versions` value comes from the production GHCR push, since manifest
+digests are registry-specific. Where podman is unavailable, the same archive copies to a local
+OCI layout with no daemon or network —
+`skopeo copy docker-archive:result-image oci:dist/oci-layout:test` then
+`skopeo inspect oci:dist/oci-layout:test | jq -r .Digest` (this is the path used to verify the
+pipeline at build time).
+
+**Trust policy (NixOS caveat).** skopeo requires a containers trust policy, and nixpkgs ships
+none — a NixOS host has no `/etc/containers/policy.json` (the same gap §4 notes for podman). The
+recipe handles this automatically: it uses `$SKOPEO_POLICY` if set, else an existing
+system/user policy, else it synthesizes the standard accept-all default in a temp file. Set
+`SKOPEO_POLICY=/path/to/policy.json` to enforce a stricter policy.
+
+### Notes
+
+- **Architecture:** the WASM build only works on `x86_64-linux`/`aarch64-linux` (emscripten
+  pin) and `dockerTools` builds per-system; v1 publishes **x86_64-only** (Fly is x86_64-first,
+  Q9). A manifest list is a later `push-image` extension (`skopeo copy --all` / `--multi-arch`),
+  not built here.
+- **CI automation is deferred** until registry credentials exist; the manual runbook above is the
+  accepted v1 floor.
 
 ---
 
@@ -323,9 +398,10 @@ the build matrix avoids paying microvm.nix's input closure on every superproject
    the daemon boots with no `HOME` and no `/etc/passwd` (the hub-cache probe is no longer
    fatal, with a data-dir fallback). The launcher still roots `HOME` on the volume for
    durability (§2 point 4).
-7. **Image publishing pipeline (D4's CI half).** The flake builds the artifact; pushing
-   (registry choice, digest recording into `node_versions`, canary channel) is daemon-repo
-   CI work the spec assigns to D4 (§5 above).
+7. ~~**Image publishing pipeline (D4's CI half).**~~ **Wired** as `just push-image` (skopeo
+   push → digest recorded to `dist/hosted-node-digest.txt`; registry GHCR, canary = `-canary`
+   tag suffix — §5 above). Remaining: an operator pastes the digest into the `node_versions`
+   API, and CI automation is deferred until registry credentials exist.
 8. **Wire-version stamping.** `node_versions.wire_version` is informational; if the
    hosting worker wants it machine-readable, an OCI label
    (`ai.daemon.wire-version=<N>`) on the image is a one-liner in the `config.Labels`
