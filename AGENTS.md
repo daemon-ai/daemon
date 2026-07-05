@@ -25,8 +25,31 @@ layer — UI work that lands GUI-only without its TUI counterpart is incomplete 
 - `just deny`   # dependency advisories / licenses / bans / sources
 - Build + test what you touched: `just build-all`, and the relevant `just e2e` / per-repo tests.
 
-Install the pre-commit hook once per clone: `just install-hooks`. Never bypass it
-(`git commit --no-verify` is forbidden).
+Install the hooks once per clone: `just install-hooks` (pre-commit for all three repos, plus
+the superproject-only pre-push signed-commit gate). Never bypass them (`git commit --no-verify`
+and `git push --no-verify` are forbidden).
+
+## Commit signing — superproject (non-negotiable)
+
+Every commit in the **superproject** (this repo, the `.` bundle) MUST be GPG-signed. This is a
+hard invariant, enforced in layers because a config value alone is not a gate:
+
+- **Agents MUST NOT create any superproject commit without explicit, per-change human approval.**
+  Do not commit here as a side effect of "finishing" work — propose the change and let the human
+  commit (signed), or wait for an explicit "commit this" for the superproject specifically.
+- **FORBIDDEN in the superproject** — never use any of these, and never instruct a subagent to:
+  `-c commit.gpgsign=false`, `--no-gpg-sign`, `--no-verify` (commit or push), `commit.gpgsign=false`
+  in any config scope, or any other means of disabling signing or skipping the hooks. If signing
+  cannot happen (e.g. the hardware key is absent), the correct outcome is that the commit FAILS —
+  do not route around it.
+- **Enforcement layers**: `scripts/pre-commit.sh` refuses when signing is disabled for the commit;
+  `scripts/pre-push.sh` cryptographically verifies (`git verify-commit`) every pushed commit is
+  signed; and the origin's branch protection ("Require signed commits") is the authoritative,
+  client-un-bypassable gate. The ultimate control is physical: the signing key lives on removable
+  hardware, so with it detached no signed commit — hence no commit — can be produced.
+- The child submodules (`daemon-node`, `daemon-app`) intentionally do **not** require signing
+  (local `commit.gpgsign=false` is their convention). Do not "fix" that, and do not copy the
+  superproject signing gate into them.
 
 ## Codec contract (do not edit generated code by hand)
 

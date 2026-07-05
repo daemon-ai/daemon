@@ -725,6 +725,13 @@ install-hooks:
       ln -sf "$hook" "$repo/$dir/pre-commit"
       echo "installed pre-commit hook -> $repo/$dir/pre-commit"
     done
+    # Superproject-only signed-commit gate: pre-push cryptographically verifies every pushed
+    # commit is GPG-signed (see scripts/pre-push.sh). The children sign by convention only.
+    pushhook="$PWD/scripts/pre-push.sh"
+    chmod +x "$pushhook"
+    superdir=$(git rev-parse --git-path hooks)
+    ln -sf "$pushhook" "$superdir/pre-push"
+    echo "installed pre-push signed-commit gate -> $superdir/pre-push"
 
 # --- code review / tech-debt tooling (opt-in `review` shell) --------------
 # CodeScene (cs / cs-mcp) + mrva (+ codeql) live in the unfree-gated `.#review` devShell, which
