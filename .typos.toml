@@ -12,6 +12,10 @@ extend-exclude = [
   # crosses into the daemon-app submodule (which resets paths to the submodule root).
   "**/src/core/daemon/codec/generated/**",
   "**/src/core/daemon/codec/vendor/**",
+  # Vendored Monocypher (minisign verification) + updater vendor tree: upstream
+  # spellings ("publically", "cannonical") are not ours to fix.
+  "**/src/core/update/vendor/**",
+  "**/src/tools/updater/vendor/**",
   "*.lock",
   # Intentional mangled text for pseudo-localization testing.
   "**/pseudolocalize.py",
@@ -28,6 +32,9 @@ clonable = "clonable"       # accepted variant of "cloneable"
 togglable = "togglable"     # accepted variant of "toggleable"
 lod = "lod"                 # LOD: level-of-detail (e.g. m_lodTier)
 muc = "muc"                 # MUC: XMPP multi-user chat
+secur = "secur"             # Secur32.dll: the Windows SSPI system library
+cpy = "cpy"                 # NSIS StrCpy instruction (per-user NSIS template patch)
+flate = "flate"             # the flate2 crate (DEFLATE), mirrors daemon-node/typos.toml
 arange = "arange"           # numpy np.arange in skill examples
 canva = "canva"             # Canva (product name)
 # Short fragments typos extracts from larger identifiers/words/fixtures (PNGs, MorAlekss, ...).
