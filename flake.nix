@@ -304,12 +304,14 @@
         # Windows, and needs wineserver/network features the nix build sandbox forbids - same split
         # as daemon-app's apps.windows-smoke / apps.portable-smoke). Reuses the exact nix-provided
         # (WoW64) wine from daemon-app's windows stack + the same hardened, hermetic prelude
-        # (throwaway prefix, gecko/mono + their fetches disabled, offscreen QPA, wineserver -w
-        # teardown), and drives the full co-located flow: silent-install package-nsis, assert the
-        # installed tree ships all three exes, `--version` daemon + daemon-cli, boot the installed
-        # daemon-app.exe in daemon mode (offscreen, WAIT_READY + WAIT_CONNECTED) so it spawns the
-        # co-located daemon.exe and connects over the named pipe (the pipe-name contract), then a
-        # daemon-cli `status` call over that same pipe, and finally the uninstaller presence.
+        # (throwaway prefix, gecko/mono + their fetches disabled, offscreen QPA, kill-then-wait
+        # wineserver teardown), and drives the full co-located flow: silent PER-USER install of
+        # package-nsis (no /D - the compiled-in $LOCALAPPDATA\Programs\Daemon default the
+        # SelfApply updater relies on), assert the installed tree ships all three exes +
+        # daemon-updater.exe, `--version` daemon + daemon-cli, boot the installed daemon-app.exe
+        # in daemon mode (offscreen, WAIT_READY + WAIT_CONNECTED) so it spawns the co-located
+        # daemon.exe and connects over the named pipe (the pipe-name contract), then a daemon-cli
+        # `status` call over that same pipe, and finally the uninstaller presence.
         smokeWindows = pkgs.writeShellApplication {
           name = "smoke-windows";
           runtimeInputs = [ daemon-app.packages.${system}.windows-smoke-wine ];
@@ -323,8 +325,10 @@
             # Headless boot: the offscreen QPA plugin is compiled into daemon-app.exe.
             export QT_QPA_PLATFORM=offscreen
             export QT_QUICK_BACKEND=software
-            # Teardown: settle wineserver before removing the prefix (nothing left holding the tree).
-            trap 'wineserver -w 2>/dev/null || true; rm -rf "$tmp"' EXIT
+            # Teardown: the app-spawned daemon.exe is deliberately left serving its pipe (the
+            # cli-status step talks to it), so a bare `wineserver -w` would wait forever. Kill
+            # everything in the prefix (-k) first, then wait (-w) so nothing races the rm.
+            trap 'wineserver -k 2>/dev/null || true; wineserver -w 2>/dev/null || true; rm -rf "$tmp"' EXIT
 
             installerExe=$(find ${bundledNsis} -maxdepth 1 -name 'daemon-*-win64.exe' -print -quit)
             status=0
@@ -343,22 +347,31 @@
             echo "== smoke-windows: wineboot (fresh prefix) =="
             wineboot --init >/dev/null 2>&1 || true
 
-            echo "== smoke-windows: NSIS silent install (/S) =="
-            if wine "$installerExe" /S "/D=C:\\Program Files\\Daemon" > "$tmp/install.log" 2>&1; then
+            echo "== smoke-windows: NSIS silent PER-USER install (/S, no /D) =="
+            # No /D override: exercise the compiled-in per-user default root
+            # ($LOCALAPPDATA\Programs\Daemon) - the promptless tree SelfApply swaps in place.
+            if wine "$installerExe" /S > "$tmp/install.log" 2>&1; then
               inst_rc=0
             else
               inst_rc=$?
             fi
-            bindir="$WINEPREFIX/drive_c/Program Files/Daemon/bin"
-            if [ "$inst_rc" != 0 ] || [ ! -d "$bindir" ]; then
-              echo "smoke-windows: silent install FAILED under wine (exit $inst_rc)"
+            # Resolve the per-user install dir by glob (the wine username varies).
+            bindir=$(dirname "$(ls "$WINEPREFIX"/drive_c/users/*/AppData/Local/Programs/Daemon/bin/daemon-app.exe 2>/dev/null | head -n1 || true)" 2>/dev/null || true)
+            if [ "$inst_rc" != 0 ] || [ -z "$bindir" ] || [ ! -d "$bindir" ]; then
+              echo "smoke-windows: silent per-user install FAILED under wine (exit $inst_rc)"
+              echo "  (expected tree under drive_c/users/*/AppData/Local/Programs/Daemon/bin)"
               tail -n 20 "$tmp/install.log" || true
               exit 1
             fi
-            echo "smoke-windows: silent install OK ($bindir)"
+            echo "smoke-windows: silent per-user install OK ($bindir)"
+            # Regression guard: a per-machine install would land here instead.
+            if [ -e "$WINEPREFIX/drive_c/Program Files/Daemon" ]; then
+              echo "smoke-windows: FAIL install landed in Program Files (per-user switch regressed)"
+              status=1
+            fi
 
-            echo "== smoke-windows: installed tree carries all three exes =="
-            for exe in daemon-app.exe daemon.exe daemon-cli.exe; do
+            echo "== smoke-windows: installed tree carries the bundle exes =="
+            for exe in daemon-app.exe daemon.exe daemon-cli.exe daemon-updater.exe; do
               if [ -f "$bindir/$exe" ]; then
                 echo "  present: $exe"
               else
@@ -415,7 +428,7 @@
             fi
 
             echo "== smoke-windows: uninstaller present =="
-            uninst=$(find "$WINEPREFIX/drive_c/Program Files/Daemon" -maxdepth 1 -name 'Uninstall*.exe' -print -quit 2>/dev/null || true)
+            uninst=$(find "$(dirname "$bindir")" -maxdepth 1 -name 'Uninstall*.exe' -print -quit 2>/dev/null || true)
             if [ -n "$uninst" ]; then
               echo "smoke-windows: uninstaller present ($(basename "$uninst"))"
             else
