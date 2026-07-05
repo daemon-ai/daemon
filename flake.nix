@@ -299,6 +299,134 @@
           '';
         });
 
+        # --- apps.smoke-windows (composed E2E under wine) ------------------------------
+        # Best-effort wine E2E of the COMPOSED installer (NOT a flake check; wine is emulation, not
+        # Windows, and needs wineserver/network features the nix build sandbox forbids - same split
+        # as daemon-app's apps.windows-smoke / apps.portable-smoke). Reuses the exact nix-provided
+        # (WoW64) wine from daemon-app's windows stack + the same hardened, hermetic prelude
+        # (throwaway prefix, gecko/mono + their fetches disabled, offscreen QPA, wineserver -w
+        # teardown), and drives the full co-located flow: silent-install package-nsis, assert the
+        # installed tree ships all three exes, `--version` daemon + daemon-cli, boot the installed
+        # daemon-app.exe in daemon mode (offscreen, WAIT_READY + WAIT_CONNECTED) so it spawns the
+        # co-located daemon.exe and connects over the named pipe (the pipe-name contract), then a
+        # daemon-cli `status` call over that same pipe, and finally the uninstaller presence.
+        smokeWindows = pkgs.writeShellApplication {
+          name = "smoke-windows";
+          runtimeInputs = [ daemon-app.packages.${system}.windows-smoke-wine ];
+          text = ''
+            tmp=$(mktemp -d)
+            export HOME="$tmp/home" && mkdir -p "$HOME"
+            export WINEPREFIX="$tmp/prefix"
+            export WINEDEBUG=-all
+            # Kill the gecko/mono install prompts AND their network fetches - hermetic + offline.
+            export WINEDLLOVERRIDES="mscoree,mshtml="
+            # Headless boot: the offscreen QPA plugin is compiled into daemon-app.exe.
+            export QT_QPA_PLATFORM=offscreen
+            export QT_QUICK_BACKEND=software
+            # Teardown: settle wineserver before removing the prefix (nothing left holding the tree).
+            trap 'wineserver -w 2>/dev/null || true; rm -rf "$tmp"' EXIT
+
+            installerExe=$(find ${bundledNsis} -maxdepth 1 -name 'daemon-*-win64.exe' -print -quit)
+            status=0
+
+            # Deterministic connection target: the daemon (DAEMON_SOCKET_PATH), the app
+            # (DAEMON_APP_SOCKET -> QLocalSocket) and the CLI all derive the SAME named pipe from
+            # this exact string via the pipe-name contract. A plain Windows path; the launcher
+            # creates its parent dir before spawning the daemon.
+            sock='C:\daemon-e2e\daemon.sock'
+            export DAEMON_SOCKET_PATH="$sock"
+            export DAEMON_APP_SOCKET="$sock"
+            export DAEMON_APP_SERVICE_MODE=daemon
+            export DAEMON_APP_WAIT_READY=60000
+            export DAEMON_APP_WAIT_CONNECTED=1
+
+            echo "== smoke-windows: wineboot (fresh prefix) =="
+            wineboot --init >/dev/null 2>&1 || true
+
+            echo "== smoke-windows: NSIS silent install (/S) =="
+            if wine "$installerExe" /S "/D=C:\\Program Files\\Daemon" > "$tmp/install.log" 2>&1; then
+              inst_rc=0
+            else
+              inst_rc=$?
+            fi
+            bindir="$WINEPREFIX/drive_c/Program Files/Daemon/bin"
+            if [ "$inst_rc" != 0 ] || [ ! -d "$bindir" ]; then
+              echo "smoke-windows: silent install FAILED under wine (exit $inst_rc)"
+              tail -n 20 "$tmp/install.log" || true
+              exit 1
+            fi
+            echo "smoke-windows: silent install OK ($bindir)"
+
+            echo "== smoke-windows: installed tree carries all three exes =="
+            for exe in daemon-app.exe daemon.exe daemon-cli.exe; do
+              if [ -f "$bindir/$exe" ]; then
+                echo "  present: $exe"
+              else
+                echo "  MISSING: $exe"
+                status=1
+              fi
+            done
+
+            echo "== smoke-windows: daemon.exe / daemon-cli.exe --version =="
+            if wine "$bindir/daemon.exe" --version > "$tmp/daemon-version.log" 2>&1; then
+              echo "  daemon.exe --version: $(tr -d '\r' < "$tmp/daemon-version.log" | tail -n1)"
+            else
+              echo "  daemon.exe --version FAILED"
+              tail -n 5 "$tmp/daemon-version.log" || true
+              status=1
+            fi
+            if wine "$bindir/daemon-cli.exe" --version > "$tmp/cli-version.log" 2>&1; then
+              echo "  daemon-cli.exe --version: $(tr -d '\r' < "$tmp/cli-version.log" | tail -n1)"
+            else
+              echo "  daemon-cli.exe --version FAILED"
+              tail -n 5 "$tmp/cli-version.log" || true
+              status=1
+            fi
+
+            echo "== smoke-windows: app spawns co-located daemon.exe + connects over the pipe =="
+            if wine "$bindir/daemon-app.exe" > "$tmp/app.log" 2>&1; then
+              app_rc=0
+            else
+              app_rc=$?
+            fi
+            tail -n 25 "$tmp/app.log" || true
+            if grep -q "DAEMON_APP_READY ok" "$tmp/app.log"; then
+              echo "smoke-windows: app<->daemon connected (DAEMON_APP_READY ok)"
+            else
+              echo "smoke-windows: app<->daemon connect FAILED under wine (exit $app_rc)"
+              status=1
+            fi
+
+            echo "== smoke-windows: daemon-cli.exe status over the named pipe =="
+            cli_ok=0
+            for _ in 1 2 3 4 5; do
+              if wine "$bindir/daemon-cli.exe" status > "$tmp/cli-status.log" 2>&1; then
+                cli_ok=1
+                break
+              fi
+              sleep 1
+            done
+            tail -n 20 "$tmp/cli-status.log" || true
+            if [ "$cli_ok" = 1 ]; then
+              echo "smoke-windows: daemon-cli status OK over the pipe"
+            else
+              echo "smoke-windows: daemon-cli status FAILED over the pipe"
+              status=1
+            fi
+
+            echo "== smoke-windows: uninstaller present =="
+            uninst=$(find "$WINEPREFIX/drive_c/Program Files/Daemon" -maxdepth 1 -name 'Uninstall*.exe' -print -quit 2>/dev/null || true)
+            if [ -n "$uninst" ]; then
+              echo "smoke-windows: uninstaller present ($(basename "$uninst"))"
+            else
+              echo "smoke-windows: uninstaller MISSING"
+              status=1
+            fi
+
+            exit "$status"
+          '';
+        };
+
         # macOS DMG (aarch64-darwin): the darwin twin of bundledLinuxArtifacts /
         # bundledNsis. daemon-app's DragNDrop artifact with the node binaries
         # appended to its cmakeFlags, so the DAEMON_APP_BUNDLED_* cache vars land
@@ -600,6 +728,16 @@
             type = "app";
             program = "${bundledWeb}/bin/hosted-node";
             meta.description = "Run the daemon serving its browser GUI on one origin (hosted-node launcher)";
+          };
+
+          # Composed Windows E2E under wine: silent-install the bundled NSIS installer and validate
+          # the full co-located app<->daemon(named pipe)<-cli flow. Best-effort (wine is emulation),
+          # non-gating; run with `just smoke-windows` or
+          # `nix run '.?submodules=1#smoke-windows'`.
+          smoke-windows = {
+            type = "app";
+            program = "${smokeWindows}/bin/smoke-windows";
+            meta.description = "Silent-install the composed NSIS installer under wine and validate the app+daemon+cli named-pipe flow";
           };
 
           # The one impure step: copy the pure codegen output into the working tree. Nix never mutates

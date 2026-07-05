@@ -152,6 +152,15 @@ package-portable:
 package-windows:
     nix build ".?submodules=1#package-nsis" --out-link result-package-windows
 
+# Composed Windows E2E under wine: silent-install the bundled NSIS installer into a throwaway
+# prefix and validate the full co-located flow - installed tree has all three exes, daemon +
+# daemon-cli --version, the app spawns the co-located daemon.exe and connects over the named pipe
+# (DAEMON_APP_READY ok), a daemon-cli status call over that pipe, and the uninstaller. Best-effort:
+# wine is emulation, not Windows (and segfaults inside sandboxed shells) - failures are reported,
+# not gating. Verify installers on a real Windows host for release.
+smoke-windows:
+    nix run ".?submodules=1#smoke-windows"
+
 # macOS DMG (deb/rpm/NSIS twin) with the node bundle embedded. Mac host only: the
 # DragNDrop generator shells out to hdiutil/codesign, and the attr is aarch64-darwin
 # only. No-ops on Linux so `package-*` calls stay portable.
