@@ -356,8 +356,11 @@
               inst_rc=$?
             fi
             # Resolve the per-user install dir by glob (the wine username varies).
-            bindir=$(dirname "$(ls "$WINEPREFIX"/drive_c/users/*/AppData/Local/Programs/Daemon/bin/daemon-app.exe 2>/dev/null | head -n1 || true)" 2>/dev/null || true)
-            if [ "$inst_rc" != 0 ] || [ -z "$bindir" ] || [ ! -d "$bindir" ]; then
+            bindir=""
+            for f in "$WINEPREFIX"/drive_c/users/*/AppData/Local/Programs/Daemon/bin/daemon-app.exe; do
+              if [ -f "$f" ]; then bindir=$(dirname "$f"); break; fi
+            done
+            if [ "$inst_rc" != 0 ] || [ -z "$bindir" ]; then
               echo "smoke-windows: silent per-user install FAILED under wine (exit $inst_rc)"
               echo "  (expected tree under drive_c/users/*/AppData/Local/Programs/Daemon/bin)"
               tail -n 20 "$tmp/install.log" || true
