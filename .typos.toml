@@ -33,6 +33,7 @@ togglable = "togglable"     # accepted variant of "toggleable"
 lod = "lod"                 # LOD: level-of-detail (e.g. m_lodTier)
 muc = "muc"                 # MUC: XMPP multi-user chat
 secur = "secur"             # Secur32.dll: the Windows SSPI system library
+seh = "seh"                 # libgcc_s_seh-1.dll: the MinGW SEH unwinder runtime (bundled worker)
 cpy = "cpy"                 # NSIS StrCpy instruction (per-user NSIS template patch)
 flate = "flate"             # the flate2 crate (DEFLATE), mirrors daemon-node/typos.toml
 arange = "arange"           # numpy np.arange in skill examples
