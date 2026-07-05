@@ -135,9 +135,11 @@ verify-push: build-image
 # --- packaging --------------------------------------------------------------
 # Shippable installers with the app+node bundle embedded (flake.nix bundle matrix): each target
 # that can carry the daemon does. Linux packages ship bin/{daemon-app,daemon,daemon-infer,
-# daemon-cli}; the NSIS installer ships daemon.exe + daemon-cli.exe (no daemon-infer.exe - the
-# llama worker has no MinGW cross build yet); the DMG fills the same contract on a mac host
-# (daemon-app/packaging/macos/README.md). APK/WASM stay thin remote clients by design.
+# daemon-cli}; the NSIS installer ships the same set including daemon-infer.exe (the llama worker,
+# cross-built for x86_64-pc-windows-gnu) plus its ggml/llama/mtmd DLLs + MinGW runtime in bin\
+# (vulkan-1.dll excluded - CPU fallback on driverless hosts); the DMG fills the same contract on a
+# mac host with the Metal worker (daemon-app/packaging/macos/README.md). APK/WASM stay thin remote
+# clients by design.
 
 # Linux installers (deb + rpm + AppImage + zsync) with the node bundle embedded.
 package-linux:
@@ -181,7 +183,8 @@ package-all: package-linux package-portable package-windows
 # Cachix cache so CI and other machines pull them instead of rebuilding. The write token is read
 # from .env (CACHIX_KEY -> CACHIX_AUTH_TOKEN, the variable the cachix CLI expects) and never
 # printed. Submodule-aware attrs use `.?submodules=1#...`; the daemon-app-only attrs (apk / wasm /
-# the static-Qt build stacks) build straight from ./daemon-app. Also pushes the daemon-node and
+# the static-Qt build stacks) build straight from ./daemon-app, and the daemon-node cross-built
+# Windows engine workers build straight from ./daemon-node. Also pushes the daemon-node and
 # daemon-app devShell closures so CI's `nix develop` pulls instead of rebuilding.
 cache-push:
     #!/usr/bin/env bash
@@ -209,9 +212,19 @@ cache-push:
       "./daemon-app#qt-android"
       "./daemon-app#qt-wasm"
     )
+    # daemon-node cross-built Windows engine workers + the prebuilt llama.cpp they build against.
+    # The NSIS bundle copies the llama worker's DLLs into its payload, so the worker derivation
+    # itself never lands in package-nsis's runtime closure - push these directly so CI / other
+    # machines pull the heavy Windows cross build instead of rebuilding it. (Metal lanes are
+    # aarch64-darwin only and are seeded from a mac host, not this Linux recipe.)
+    node_attrs=(
+      "./daemon-node#daemon-infer-llama-windows"
+      "./daemon-node#daemon-infer-mistralrs-windows"
+      "./daemon-node#llama-cpp-windows"
+    )
 
     paths=()
-    for a in "${super_attrs[@]}" "${app_attrs[@]}"; do
+    for a in "${super_attrs[@]}" "${app_attrs[@]}" "${node_attrs[@]}"; do
       echo "cache-push: building $a" >&2
       while IFS= read -r p; do [ -n "$p" ] && paths+=("$p"); done \
         < <(nix build --print-out-paths --no-link "$a")

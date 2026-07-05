@@ -239,9 +239,11 @@
         #                                    lib/{libstdc++,libgomp} for the worker) - the packaging
         #                                    pre-build script patchelfs every staged ELF for the
         #                                    generic-distro floor
-        #   NSIS (Windows)                   bin\{daemon-app.exe,daemon.exe,daemon-cli.exe}; no
-        #                                    daemon-infer.exe (the llama engine worker has no MinGW
-        #                                    cross build - local inference on Windows is deferred)
+        #   NSIS (Windows)                   bin\{daemon-app.exe,daemon.exe,daemon-cli.exe,
+        #                                    daemon-infer.exe} (+ the llama worker's ggml/llama/mtmd
+        #                                    DLLs + MinGW runtime in bin\, beside the exe on the PE
+        #                                    loader search path; vulkan-1.dll deliberately excluded -
+        #                                    ggml-vulkan is a runtime-DL backend, CPU fallback else)
         #   DMG (macOS)                      same cache-var contract, filled on a mac host (needs
         #                                    aarch64-darwin node builds; packaging/macos/README.md)
         #   APK / WASM                       no embedding by design - thin remote clients; the wasm
@@ -284,17 +286,57 @@
             cp -v ${bundledLinuxArtifacts}/${glob}.sha256 "$out"/ 2>/dev/null || true
           '';
 
-        # Windows NSIS installer: daemon.exe + daemon-cli.exe cross-built by daemon-node's windows
-        # lane. The child's NSIS derivation re-runs cmake with extra -D flags at the end of its
-        # configurePhase, so the injection appends the same cache vars there.
+        # Windows NSIS installer: daemon.exe + daemon-cli.exe + the llama-enabled daemon-infer.exe
+        # engine worker, all cross-built by daemon-node's windows lane. The child's NSIS derivation
+        # re-runs cmake with extra -D flags at the end of its configurePhase, so the injection
+        # appends the same cache vars there.
         daemonWindows = daemon-node.packages.${system}.daemon-windows;
         daemonCliWindows = daemon-node.packages.${system}.daemon-cli-windows;
+        # The Windows llama worker (x86_64-pc-windows-gnu, cargo features llama,mtmd), cross-built
+        # FROM the current (Linux) system exactly like daemon-windows / daemon-cli-windows above.
+        # Its bin/ carries daemon-infer.exe plus the ggml/llama/mtmd DLL closure + the MinGW runtime
+        # AND a vulkan-1.dll (kept there for GPU-lane dev convenience) - which we deliberately do NOT
+        # ship (see the DLL-collection guard below).
+        daemonInferLlamaWindows = daemon-node.packages.${system}.daemon-infer-llama-windows;
         bundledNsis = daemon-app.packages.${system}.nsis.overrideAttrs (old: {
           pname = "daemon-bundled-windows-nsis";
           configurePhase = old.configurePhase + ''
+            # Collect the worker's runtime DLLs by glob from its bin/, EXCLUDING vulkan-1.dll.
+            # ggml-vulkan.dll is a GGML_BACKEND_DL backend dlopen()ed at startup; on a machine with a
+            # GPU driver the system provides the vulkan-1 loader, and on a driverless machine the
+            # backend simply fails to load and ggml falls back to ggml-cpu.dll. Shipping our own
+            # vulkan-1.dll would mask that fallback, so it is dropped from the installed tree.
+            # Globbing (rather than hardcoding names) tolerates upstream ggml DLL renames; a minimum
+            # core set is asserted below.
+            infer_bin='${daemonInferLlamaWindows}/bin'
+            win_libs=""
+            for dll in "$infer_bin"/*.dll; do
+              bn="$(basename "$dll")"
+              [ "$bn" = "vulkan-1.dll" ] && continue
+              win_libs="''${win_libs:+$win_libs;}$dll"
+            done
+            # Assert the core engine DLLs are present (fail loud if the worker output changed shape).
+            # ggml DLLs are unprefixed, llama/mtmd are lib-prefixed - accept either spelling.
+            for core in ggml ggml-base ggml-cpu ggml-vulkan llama mtmd; do
+              if [ ! -e "$infer_bin/$core.dll" ] && [ ! -e "$infer_bin/lib$core.dll" ]; then
+                echo "FATAL: bundled windows worker missing core DLL '$core' in $infer_bin" >&2
+                ls -la "$infer_bin" >&2
+                exit 1
+              fi
+            done
+            # Regression guard: vulkan-1.dll must never reach the bundled set.
+            case ";$win_libs;" in
+              *"/vulkan-1.dll;"*)
+                echo "FATAL: vulkan-1.dll leaked into DAEMON_APP_BUNDLED_LIBS" >&2
+                exit 1
+                ;;
+            esac
+
             cmake \
               -DDAEMON_APP_BUNDLED_DAEMON=${daemonWindows}/bin/daemon.exe \
               -DDAEMON_APP_BUNDLED_DAEMON_CLI=${daemonCliWindows}/bin/daemon-cli.exe \
+              -DDAEMON_APP_BUNDLED_DAEMON_INFER=${daemonInferLlamaWindows}/bin/daemon-infer.exe \
+              -DDAEMON_APP_BUNDLED_LIBS="$win_libs" \
               .
           '';
         });
@@ -374,7 +416,7 @@
             fi
 
             echo "== smoke-windows: installed tree carries the bundle exes =="
-            for exe in daemon-app.exe daemon.exe daemon-cli.exe daemon-updater.exe; do
+            for exe in daemon-app.exe daemon.exe daemon-cli.exe daemon-updater.exe daemon-infer.exe; do
               if [ -f "$bindir/$exe" ]; then
                 echo "  present: $exe"
               else
@@ -382,6 +424,57 @@
                 status=1
               fi
             done
+
+            echo "== smoke-windows: llama worker engine DLLs ship beside the exe in bin/ =="
+            # ggml DLLs are unprefixed, llama/mtmd carry the MinGW lib prefix - accept either.
+            have_dll() { [ -f "$bindir/$1.dll" ] || [ -f "$bindir/lib$1.dll" ]; }
+            for core in ggml ggml-base ggml-cpu ggml-vulkan llama mtmd; do
+              if have_dll "$core"; then
+                echo "  present: $core (.dll or lib$core.dll)"
+              else
+                echo "  MISSING engine DLL: $core"
+                status=1
+              fi
+            done
+            # MinGW runtime the worker links (mcfgthread, NOT winpthread).
+            for rt in libstdc++-6.dll libgcc_s_seh-1.dll libmcfgthread-2.dll; do
+              if [ -f "$bindir/$rt" ]; then
+                echo "  present: $rt"
+              else
+                echo "  MISSING mingw runtime: $rt"
+                status=1
+              fi
+            done
+
+            echo "== smoke-windows: vulkan-1.dll must NOT ship anywhere in the installed tree =="
+            # The daemon dir (bin + any sibling) is the whole per-user install; scan it all.
+            installroot="$(dirname "$bindir")"
+            vk_hits=$(find "$installroot" -iname 'vulkan-1.dll' 2>/dev/null || true)
+            if [ -n "$vk_hits" ]; then
+              echo "  FAIL: vulkan-1.dll present in the installed tree:"
+              echo "$vk_hits"
+              status=1
+            else
+              echo "  ok: no vulkan-1.dll anywhere (this run is the CPU-fallback proof)"
+            fi
+
+            echo "== smoke-windows: daemon-infer.exe --version (CPU fallback; no vulkan loader) =="
+            # With no vulkan-1.dll present, ggml_backend_load_all() cannot load ggml-vulkan.dll and
+            # silently falls back to ggml-cpu.dll; a clean --version exit proves that fallback path.
+            if wine "$bindir/daemon-infer.exe" --version > "$tmp/infer-version.log" 2>&1; then
+              infer_line="$(tr -d '\r' < "$tmp/infer-version.log" | tail -n1)"
+              echo "  daemon-infer.exe --version: $infer_line"
+              if printf '%s' "$infer_line" | grep -q 'daemon-infer'; then
+                echo "  ok: version output contains 'daemon-infer'"
+              else
+                echo "  FAIL: version output missing 'daemon-infer'"
+                status=1
+              fi
+            else
+              echo "  daemon-infer.exe --version FAILED"
+              tail -n 5 "$tmp/infer-version.log" || true
+              status=1
+            fi
 
             echo "== smoke-windows: daemon.exe / daemon-cli.exe --version =="
             if wine "$bindir/daemon.exe" --version > "$tmp/daemon-version.log" 2>&1; then
@@ -446,18 +539,25 @@
         # macOS DMG (aarch64-darwin): the darwin twin of bundledLinuxArtifacts /
         # bundledNsis. daemon-app's DragNDrop artifact with the node binaries
         # appended to its cmakeFlags, so the DAEMON_APP_BUNDLED_* cache vars land
-        # daemon / daemon-cli / daemon-infer (the llama-enabled worker, matching
-        # the Linux bundle's component set) into Contents/MacOS next to the app
+        # daemon / daemon-cli / daemon-infer into Contents/MacOS next to the app
         # executable - LocalDaemonLauncher discovers them there, no wrapper. Later
         # -D wins, so appending fills the child's empty cache vars. The child's
         # macos-dmg output is itself darwin-only (dynamic null attr name), so this
         # is referenced only from the aarch64-darwin packages branch below; keeping
         # it a lazy let binding means the Linux package set never forces it.
+        #
+        # The Apple worker is daemon-infer-metal (llama,mtmd,metal): its Mach-O links
+        # only /System/Library frameworks, so it needs NO sidecar dylibs and NO
+        # .metallib (the Metal shaders are embedded and JIT-compiled at runtime) -
+        # hence no DAEMON_APP_BUNDLED_LIBS on darwin. daemon-infer-metal lives in
+        # daemon-node's aarch64-darwin package set; this binding (like bundledDmg) is
+        # forced only on that system, so the Linux eval never touches it.
+        daemonInferMetal = daemon-node.packages.${system}.daemon-infer-metal;
         bundledDmg = daemon-app.packages.${system}.macos-dmg.overrideAttrs (old: {
           pname = "daemon-bundled-macos-dmg";
           cmakeFlags = old.cmakeFlags ++ [
             "-DDAEMON_APP_BUNDLED_DAEMON=${daemonBin}/bin/daemon"
-            "-DDAEMON_APP_BUNDLED_DAEMON_INFER=${daemonInferLlama}/bin/daemon-infer"
+            "-DDAEMON_APP_BUNDLED_DAEMON_INFER=${daemonInferMetal}/bin/daemon-infer"
             "-DDAEMON_APP_BUNDLED_DAEMON_CLI=${daemonCli}/bin/daemon-cli"
           ];
         });
