@@ -18,6 +18,10 @@ the cross-repo end-to-end integration tests.
   derivation, a `checks.codec-drift` gate, and an `apps.update-codec` helper.
 - `justfile` - one entry point for builds, the codec contract, and the E2E suite
   (`just` to list recipes).
+- `docs/` - operator docs: the update rollout specification
+  (`docs/update-rollout.md` - how releases are cut, signed, published, and
+  picked up by the installed fleet) and the hosted-node OCI image shape
+  (`docs/hosted-node-image.md`).
 
 ## Working with submodules
 
