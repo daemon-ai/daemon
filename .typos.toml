@@ -17,8 +17,11 @@ extend-exclude = [
   "**/src/core/update/vendor/**",
   "**/src/tools/updater/vendor/**",
   "*.lock",
-  # Intentional mangled text for pseudo-localization testing.
-  "**/pseudolocalize.py",
+  # Shipped translation catalogs: the <translation> text is non-English by design
+  # and would otherwise trip the spell gate. The English <source> lives in the
+  # qsTr()/tr() literals, which are spell-checked as normal source. Mirrors the
+  # daemon-app/typos.toml exclude so the submodule-bump gate agrees.
+  "**/i18n/daemon-app_*.ts",
 ]
 
 # Domain terms / library names / valid spelling variants / short identifier fragments that typos
