@@ -12,6 +12,9 @@ target/
 .DS_Store
 .direnv/
 
+# `just dev-run`/`fresh-run` generated daemon launcher (LD_LIBRARY_PATH wrapper); never committed.
+/.dev/
+
 /user-stories/
 *.code-workspace
 .env

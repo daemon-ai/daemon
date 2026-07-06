@@ -45,6 +45,15 @@ jobs:
       # Nix is only needed for the manual C/C++ build lane.
       - if: matrix.build-mode == 'manual'
         uses: DeterminateSystems/nix-installer-action@main
+      # The daemon-ai binary cache (same substituter ci.yml uses) serves the fixed-output
+      # source derivations for daemon-app's pinned git deps (earcut, qwindowkit, ...). Some of those
+      # upstreams have since moved their default branch, so their pinned revs are no longer
+      # reachable by a plain git fetch; without this cache `nix develop` re-fetches and fails.
+      - if: matrix.build-mode == 'manual'
+        uses: cachix/cachix-action@v15
+        with:
+          name: daemon-ai
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
       - if: matrix.build-mode == 'manual'
         uses: DeterminateSystems/magic-nix-cache-action@main
 
