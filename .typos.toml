@@ -42,6 +42,8 @@ flate = "flate"             # the flate2 crate (DEFLATE), mirrors daemon-node/ty
 wronly = "wronly"           # rustix `OFlags::WRONLY` (O_WRONLY) in daemon-core exec/contained.rs
 arange = "arange"           # numpy np.arange in skill examples
 canva = "canva"             # Canva (product name)
+grammers = "grammers"       # the `grammers` Telegram MTProto crate family (daemon-telegram), mirrors daemon-node/typos.toml
+scaned = "scaned"           # WeChat iLink QR wire status value (server's own spelling), mirrors daemon-node/typos.toml
 # Short fragments typos extracts from larger identifiers/words/fixtures (PNGs, MorAlekss, ...).
 nd = "nd"
 ot = "ot"
