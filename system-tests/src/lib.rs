@@ -62,7 +62,9 @@ pub struct Daemon {
     pub data_dir: PathBuf,
     pub log: PathBuf,
     cli: PathBuf,
-    _tmp: TempDir,
+    /// The owned temp root (dropped => dir removed). `None` when the caller owns the dirs (e.g. the
+    /// CON-9 recovery scenario, which restarts a daemon on the *same* socket + data dir).
+    _tmp: Option<TempDir>,
 }
 
 impl Daemon {
@@ -80,6 +82,20 @@ impl Daemon {
     /// opt-in inference e2e to select a real cloud provider (e.g. `DAEMON_MODEL_PROVIDER=genai`,
     /// `DAEMON_MODEL=<id>`, `ANTHROPIC_API_KEY=<key>`).
     pub fn start_with_env(bins: &Bins, extra_env: &[(&str, String)]) -> Result<Daemon> {
+        Self::start_with_env_seeded(bins, extra_env, |_| Ok(()))
+    }
+
+    /// As [`Daemon::start_with_env`], but runs `seed(&data_dir)` after the isolated data dir is
+    /// created and *before* the daemon process spawns — so a scenario can pre-populate the durable
+    /// node stores the daemon reads at boot (the profile store under `<data_dir>/profiles/`, the
+    /// credential store at `<data_dir>/credentials.json`, etc.). The B7 Matrix journey uses this to
+    /// seed a `bound_accounts` profile + a restored account session, since the Matrix adapter reads
+    /// its bound accounts once at bring-up (there is no post-start wire op to add one).
+    pub fn start_with_env_seeded(
+        bins: &Bins,
+        extra_env: &[(&str, String)],
+        seed: impl FnOnce(&std::path::Path) -> Result<()>,
+    ) -> Result<Daemon> {
         // Keep the root short: a filesystem Unix socket path must fit in sun_path (108 bytes).
         let tmp = tempfile::Builder::new()
             .prefix("dst-")
@@ -91,7 +107,42 @@ impl Daemon {
         for dir in [&data_dir, &home] {
             std::fs::create_dir_all(dir)?;
         }
+        seed(&data_dir).context("seeding daemon data dir before spawn")?;
         let log = tmp.path().join("daemon.log");
+        Self::spawn_daemon(bins, socket, data_dir, home, log, Some(tmp), extra_env)
+    }
+
+    /// Spawn a daemon on caller-owned `socket` + `data_dir` + `home` paths (the harness does NOT
+    /// wrap them in a temp root — the caller keeps them alive). Used by the CON-9 host-down recovery
+    /// scenario, which kills the daemon and restarts a second one on the *same* socket + data dir to
+    /// prove the client can reconnect and resume once the node returns. `data_dir`/`home` are
+    /// created if absent; state left by a prior daemon on the same paths is preserved (durable
+    /// store), which is what makes "resume after recovery" observable.
+    pub fn start_on(
+        bins: &Bins,
+        socket: PathBuf,
+        data_dir: PathBuf,
+        home: PathBuf,
+        log: PathBuf,
+        extra_env: &[(&str, String)],
+    ) -> Result<Daemon> {
+        for dir in [&data_dir, &home] {
+            std::fs::create_dir_all(dir)?;
+        }
+        Self::spawn_daemon(bins, socket, data_dir, home, log, None, extra_env)
+    }
+
+    /// The shared spawn core: build the command with the hermetic env, own a process group, spawn,
+    /// and block until healthy. `tmp` is the owned temp root (or `None` when the caller owns dirs).
+    fn spawn_daemon(
+        bins: &Bins,
+        socket: PathBuf,
+        data_dir: PathBuf,
+        home: PathBuf,
+        log: PathBuf,
+        tmp: Option<TempDir>,
+        extra_env: &[(&str, String)],
+    ) -> Result<Daemon> {
         let log_file = std::fs::File::create(&log)?;
         let log_err = log_file.try_clone()?;
 

@@ -20,3 +20,6 @@ daemon-common = { path = "../daemon-node/crates/contracts/daemon-common" }
 anyhow = "1"
 tempfile = "3"
 libc = "0.2"
+# The B7 live-homeserver journey builds a `ProfileSpec` + credential-store blob to seed the
+# durable node stores, and parses the conduit CS-API JSON responses (register / room / sync).
+serde_json = "1"
