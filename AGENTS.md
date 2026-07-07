@@ -29,6 +29,20 @@ Install the hooks once per clone: `just install-hooks` (pre-commit for all three
 the superproject-only pre-push signed-commit gate). Never bypass them (`git commit --no-verify`
 and `git push --no-verify` are forbidden).
 
+## Fast iteration loop (runtime verification, not a gate)
+
+For edit→run cycles and user-feedback testing, do NOT rebuild the sealed bundle
+(`nix run '.?submodules=1#bundled-app'`). Use the incremental dev loop, which reproduces the
+bundled-app wiring from warm debug builds:
+
+- `just dev-run` / `just dev-run-tui` # bundled-app experience in seconds (GUI / TUI)
+- `just fresh-run`                    # dev-reset first: pristine first-run/onboarding state
+- `just dev-reset`                    # stop managed daemons/workers, wipe app+node state and `.dev/`
+                                      # (`DRY_RUN=1` to preview; `DEV_RESET_MODELS=1|all` for model state)
+
+`just e2e` also runs against these incremental clients. None of this replaces the gates above —
+`just bundle` remains the sealed parity check before calling release work done.
+
 ## Commit signing — superproject (non-negotiable)
 
 Every commit in the **superproject** (this repo, the `.` bundle) MUST be GPG-signed. This is a
