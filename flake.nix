@@ -4,9 +4,20 @@
   # Pull built closures from the daemon-ai Cachix cache (public pull). CI feeds the cache
   # deterministically via cachix-action; humans/other machines opt in with --accept-flake-config
   # (or by being a trusted-user). Public pull key only — no secret lives here.
+  # nix-community serves the `fenix` rust toolchain the children build with, so a superproject
+  # build that has to realize the children from source substitutes the toolchain instead of
+  # rederiving it (mirrors daemon-node's substituter set).
   nixConfig = {
-    extra-substituters = [ "https://daemon-ai.cachix.org" ];
-    extra-trusted-public-keys = [ "daemon-ai.cachix.org-1:jzeLmFDfgE5dzGT0RXF70IEU/tKsWdDV9LQ5zPGAnQs=" ];
+    extra-substituters = [
+      "https://daemon-ai.cachix.org"
+      "https://nix-community.cachix.org"
+      "https://cache.numtide.com"
+    ];
+    extra-trusted-public-keys = [
+      "daemon-ai.cachix.org-1:jzeLmFDfgE5dzGT0RXF70IEU/tKsWdDV9LQ5zPGAnQs="
+      "nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs="
+      "niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g="
+    ];
   };
 
   inputs = {
@@ -22,6 +33,14 @@
     # update-codec independent of the children's build closures.
     daemon-node.url = "path:./daemon-node";
     daemon-app.url = "path:./daemon-app";
+
+    # Prebuilt coding-agent CLIs (claude-code, codex, gemini-cli, opencode, ...) for the `agents`
+    # devShell below, mirroring daemon-node's `.#e2e` lane: they go on PATH so a node run from the
+    # superproject (e.g. `nix run '.?submodules=1#bundled-app'`) can discover real foreign agents
+    # (`daemon_acp::AcpDiscoverer`). Built + cache-populated against llm-agents' own pinned
+    # nixpkgs and served from cache.numtide.com (added to nixConfig above), so this does not touch
+    # our nixpkgs pin or require an allowUnfree flag on it.
+    llm-agents.url = "github:numtide/llm-agents.nix";
   };
 
   # NOTE: the daemon-node / daemon-app submodule contents are gitlinks, so this flake must be
@@ -34,7 +53,7 @@
   # child flakes as path inputs here - that would force `?submodules=1` onto every passthrough build
   # and couple this flake to both children's full input closures.
   outputs =
-    { self, nixpkgs, flake-utils, daemon-node, daemon-app }:
+    { self, nixpkgs, flake-utils, daemon-node, daemon-app, llm-agents }:
     flake-utils.lib.eachDefaultSystem (
       system:
       let
@@ -177,6 +196,13 @@
 
         # The built children for the integration bundles.
         daemonBin = daemon-node.packages.${system}.daemon;
+        # The browser-enabled daemon (the `daemon` binary + the `browser` feature -> chromiumoxide
+        # CDP). Shipped in the DOWNLOADABLE product bundles/installers below so the `browser` chat
+        # tool is available out of the box. It embeds NO Chromium (its `chrome_path` stays unset),
+        # so at runtime chromiumoxide auto-detects a Chromium already on the host's PATH (and the
+        # tool stays off unless `[browser].enable` is set). The hosted-node OCI image keeps the lean,
+        # browser-free `daemonBin` so the server image never carries the chromiumoxide bindings.
+        daemonBrowserBin = daemon-node.packages.${system}.daemon-browser;
         # The local-inference worker, built WITH the llama engine (the daemon-node default build is
         # a stub worker with no engine at all — a bundle shipping that could download models but
         # never run one). The daemon spawns it per session for llama.cpp profiles.
@@ -201,13 +227,13 @@
           { app, name, mainProgram }:
           pkgs.symlinkJoin {
             inherit name;
-            paths = [ app daemonBin daemonInferLlama ];
+            paths = [ app daemonBrowserBin daemonInferLlama ];
             nativeBuildInputs = [ pkgs.makeWrapper ];
             postBuild = ''
               for client in daemon-app daemon-tui; do
                 if [ -e "$out/bin/$client" ]; then
                   wrapProgram "$out/bin/$client" \
-                    --set-default DAEMON_BIN "${daemonBin}/bin/daemon" \
+                    --set-default DAEMON_BIN "${daemonBrowserBin}/bin/daemon" \
                     --set-default DAEMON_INFER__WORKER_BIN "${daemonInferLlama}/bin/daemon-infer" \
                     --set-default DAEMON_APP_SERVICE_MODE "daemon" \
                     --set-default DAEMON_BUNDLE_VERSION "${bundleVersion}"
@@ -264,7 +290,7 @@
         ];
 
         nodeBundleFlags = [
-          "-DDAEMON_APP_BUNDLED_DAEMON=${daemonBin}/bin/daemon"
+          "-DDAEMON_APP_BUNDLED_DAEMON=${daemonBrowserBin}/bin/daemon"
           "-DDAEMON_APP_BUNDLED_DAEMON_INFER=${daemonInferLlama}/bin/daemon-infer"
           "-DDAEMON_APP_BUNDLED_DAEMON_CLI=${daemonCli}/bin/daemon-cli"
           "-DDAEMON_APP_BUNDLED_LIBS=${lib.concatStringsSep ";" bundledRuntimeLibs}"
@@ -556,7 +582,7 @@
         bundledDmg = daemon-app.packages.${system}.macos-dmg.overrideAttrs (old: {
           pname = "daemon-bundled-macos-dmg";
           cmakeFlags = old.cmakeFlags ++ [
-            "-DDAEMON_APP_BUNDLED_DAEMON=${daemonBin}/bin/daemon"
+            "-DDAEMON_APP_BUNDLED_DAEMON=${daemonBrowserBin}/bin/daemon"
             "-DDAEMON_APP_BUNDLED_DAEMON_INFER=${daemonInferMetal}/bin/daemon-infer"
             "-DDAEMON_APP_BUNDLED_DAEMON_CLI=${daemonCli}/bin/daemon-cli"
           ];
@@ -575,7 +601,7 @@
           cp -r ${appPortable}/share "$out/share"
           cp ${appPortable}/bin/daemon-app "$out/bin/daemon-app"
 
-          install -m755 ${daemonBin}/bin/daemon "$out/bin/daemon"
+          install -m755 ${daemonBrowserBin}/bin/daemon "$out/bin/daemon"
           install -m755 ${daemonInferLlama}/bin/daemon-infer "$out/bin/daemon-infer"
           install -m755 ${daemonCli}/bin/daemon-cli "$out/bin/daemon-cli"
           for so in ${lib.concatStringsSep " " bundledRuntimeLibs}; do
@@ -946,6 +972,45 @@
             pkgs.jq
           ];
         };
+
+        # Foreign-agent CLIs on PATH for whole-product e2e: run a bundled node from the superproject
+        # (`nix run '.?submodules=1#bundled-app'`) inside this shell so its ACP discovery
+        # (`daemon_acp::AcpDiscoverer`) probes real coding-agent binaries. Mirrors daemon-node's
+        # `.#e2e` curated set, but as a superproject-native shell it needs no `?submodules=1` (the
+        # agents come straight from the `llm-agents` input + cache.numtide.com, not the children).
+        # The `want` set is filtered against what `llm-agents` exposes for this system, so an absent
+        # attr (or unsupported platform) is skipped rather than breaking eval. Unfree agents are
+        # instantiated by llm-agents' own unfree-permitting nixpkgs, so this needs no allowUnfree on
+        # our pin.
+        devShells.agents =
+          let
+            a = llm-agents.packages.${system} or { };
+            want = [
+              "gemini-cli"
+              "qwen-code"
+              "goose-cli"
+              "opencode"
+              "codex"
+              "cursor-agent"
+              "copilot-cli"
+              "droid"
+              "iflow-cli"
+              "qoder-cli"
+              "kilocode-cli"
+              "mistral-vibe"
+              "junie"
+              "eca"
+              "claude-code"
+              "amp"
+            ];
+            agents = map (n: a.${n}) (builtins.filter (n: a ? ${n}) want);
+          in
+          pkgs.mkShell {
+            packages = [
+              pkgs.just
+              pkgs.jq
+            ] ++ agents;
+          };
 
         # Opt-in code-review / tech-debt tooling. Entered explicitly (`nix develop .#review`, or via
         # the `just cursor` / MCP wrapper); never on the free default path. Sources `.env` at entry
