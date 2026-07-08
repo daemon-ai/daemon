@@ -207,8 +207,11 @@
         # a stub worker with no engine at all — a bundle shipping that could download models but
         # never run one). The daemon spawns it per session for llama.cpp profiles.
         daemonInferLlama = daemon-node.packages.${system}.daemon-infer-llama;
-        guiApp = daemon-app.packages.${system}.default;
-        tuiApp = daemon-app.packages.${system}.tui;
+        # Static-Qt desktop clients: fully self-contained (no dynamic Qt), the
+        # terminal + OS keychain are compiled in. app-static emits both daemon-app
+        # and daemon-tui; tui-static is a thin symlink view exposing just daemon-tui.
+        guiApp = daemon-app.packages.${system}.app-static;
+        tuiApp = daemon-app.packages.${system}.tui-static;
 
         # Wrap a client so it ships with the daemon host binary: set DAEMON_BIN by default (the
         # LocalDaemonLauncher's first env-based discovery step) so a packaged install can spawn a
@@ -579,6 +582,10 @@
         # daemon-node's aarch64-darwin package set; this binding (like bundledDmg) is
         # forced only on that system, so the Linux eval never touches it.
         daemonInferMetal = daemon-node.packages.${system}.daemon-infer-metal;
+        # TODO(static-qt-everything/macos): once nix/macos.nix lands the static
+        # macOS app and re-exposes packages.macos-dmg from the static build,
+        # this .overrideAttrs call may need no change (it already consumes
+        # macos-dmg); verify after the darwin worker completes Phase 3b.
         bundledDmg = daemon-app.packages.${system}.macos-dmg.overrideAttrs (old: {
           pname = "daemon-bundled-macos-dmg";
           cmakeFlags = old.cmakeFlags ++ [
