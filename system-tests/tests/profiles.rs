@@ -157,7 +157,19 @@ fn gui_creates_and_edits_a_profile() {
         return;
     }
 
-    let daemon = Daemon::start().expect("daemon becomes ready");
+    // Persona (SOUL.md) management is bound only on a durable node — an ephemeral (memory-store)
+    // node runs on the built-in role personas with no SOUL.md, so `SoulGet`/`SoulSet` resolve to
+    // Unsupported there. Run against the SQLite store backend so the persona round-trip below is
+    // real (mirrors `profile_export_import_history_revert`).
+    let bins = match Bins::from_env() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("skipping gui_creates_and_edits_a_profile: {e}");
+            return;
+        }
+    };
+    let daemon = Daemon::start_with_env(&bins, &[("DAEMON_STORE", "sqlite".into())])
+        .expect("durable daemon becomes ready");
     let proxy = RecordingProxy::start(daemon.socket.clone()).expect("proxy starts");
 
     let run = run_gui_profile(&gui, &proxy.socket, "work", "gpt-4o", "Be terse.", 15000)
@@ -196,12 +208,21 @@ fn gui_creates_and_edits_a_profile() {
     {
         ApiResponse::Profile(Some(spec)) => {
             assert_eq!(spec.model, "gpt-4o", "the edit should persist the model");
-            assert_eq!(
-                spec.system_prompt, "Be terse.",
-                "the edit should persist the prompt"
-            );
         }
         other => panic!("ProfileGet did not return the edited spec: {other:?}"),
+    }
+
+    // The persona is no longer a spec field (wire v36): it is node-owned SOUL.md, read back over
+    // the wire only via SoulGet. The GUI routed the prompt through SoulSet after create, so the
+    // round-trip returns the persona text the client set.
+    match api_call(&daemon.socket, &ApiRequest::SoulGet { id: "work".into() })
+        .expect("SoulGet round-trips")
+    {
+        ApiResponse::SoulText(text) => assert_eq!(
+            text, "Be terse.",
+            "the edit should persist the persona (SOUL.md)"
+        ),
+        other => panic!("SoulGet did not return the persona text: {other:?}"),
     }
 }
 
