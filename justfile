@@ -343,6 +343,22 @@ update-codec:
 # Regenerate the vendored codec, then build everything (the "clean automatic" path).
 sync: update-codec build-all
 
+# --- icon pipeline --------------------------------------------------------
+# The two source SVGs (daemon-app/packaging/icons/{small,large}.svg) are the only
+# hand-edited icon assets; every committed platform format (Linux hicolor PNGs +
+# scalable SVG, Windows .ico, macOS .icns, Android mipmaps, iOS asset catalog,
+# web favicons, and the app-embedded window/tray PNGs) is generated from them by
+# daemon-app's nix/icons.nix. Like the codec, the outputs are checked in so
+# packaging never rasterizes at build time.
+
+# Regenerate the committed platform icons into the working tree from the SVGs.
+update-icons:
+    cd daemon-app && nix run ".#update-icons"
+
+# Gate: committed icons must match what the SVGs regenerate (the icon codec-drift).
+icons-drift:
+    cd daemon-app && nix build ".#checks.{{system}}.icons-drift" -L
+
 # --- fast dev iteration loop ----------------------------------------------
 # Reproduce the `nix run '.?submodules=1#bundled-app'` experience from warm INCREMENTAL dev builds
 # instead of the sealed release `nix build`. The bundle wrapper is only a few env vars (DAEMON_BIN,
