@@ -227,6 +227,24 @@
           # at module load, which needs the wrapped typelib path (set below), absent
           # from the bare build-check env.
           dontUsePythonImportsCheck = true;
+          # NixOS reconciliation of the upstream wheel (it assumes an FHS distro):
+          #  - session.py hardcodes /usr/lib/at-spi-bus-launcher (absent here);
+          #    point it at the at-spi2-core store path.
+          #  - it brings the private bus up with dbus-run-session, whose default
+          #    session.conf has no <listen> on this host, so the bus never starts;
+          #    the patch launches our own dbus-daemon with an explicit config.
+          postInstall =
+            let
+              siteDir = "$out/${pkgs.python3Packages.python.sitePackages}/kwin_mcp";
+            in
+            ''
+              patch -p1 -d ${siteDir} < ${./nix/kwin-mcp-nixos.patch}
+              substituteInPlace ${siteDir}/session.py \
+                --replace-fail '/usr/lib/at-spi-bus-launcher' \
+                               '${pkgs.at-spi2-core}/libexec/at-spi-bus-launcher'
+              cp ${./nix/kwin-mcp-atspi-input.py} ${siteDir}/atspi_input.py
+              ${pkgs.python3}/bin/python3 ${./nix/kwin-mcp-core-fixups.py} ${siteDir}/core.py
+            '';
           makeWrapperArgs = [
             "--prefix GI_TYPELIB_PATH : ${
               lib.makeSearchPath "lib/girepository-1.0" [
@@ -238,6 +256,22 @@
             # kwin_mcp.input dlopens libei.so.1 (Wayland/libei input emulation) via
             # ctypes at import time; put it on the loader path.
             "--prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath [ pkgs.libei ]}"
+            # kwin_mcp shells out to these by bare name. Only the genuinely-missing
+            # light tools are pinned here; kwin_wayland and spectacle come from the
+            # host session on PATH (the plan's accepted host-KWin coupling), so this
+            # --prefix augments rather than replaces the inherited PATH. Pulling the
+            # whole pinned kdePackages.kwin would force a multi-hour KDE source build
+            # for no benefit over the running host compositor.
+            "--prefix PATH : ${
+              lib.makeBinPath [
+                pkgs.dbus # dbus-daemon + dbus-update-activation-environment
+                pkgs.wl-clipboard # wl-copy/wl-paste (clipboard tools)
+                pkgs.wtype # unicode typing
+                pkgs.ydotool # input injection fallback (primary is libei/EIS)
+                pkgs.bashInteractive
+                pkgs.coreutils
+              ]
+            }"
           ];
           meta = {
             description = "MCP server for KWin/Wayland automation (window control, input, screenshots, AT-SPI)";

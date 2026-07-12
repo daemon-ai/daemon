@@ -1,0 +1,52 @@
+Adapt kwin-mcp's isolated-session bring-up to NixOS.
+
+Upstream starts the private bus with `dbus-run-session`, which on this host
+launches a dbus-daemon whose default session.conf carries no <listen> element
+("Configuration file needs one or more <listen> elements giving addresses"),
+so the bus — and therefore the whole virtual session — never comes up. Launch
+our own dbus-daemon with an explicit minimal config instead. The daemon runs
+--nofork in the session's process group, so the existing killpg teardown reaps
+it with KWin and the AT-SPI bus (no leak, no trap change needed).
+
+(The companion EIS input-backend time-box lives in the flake's postInstall as
+substituteInPlace edits on core.py — string swaps, not a diff, to avoid the
+whitespace-fragility of blank patch context lines.)
+
+--- a/session.py
++++ b/session.py
+@@ -146,7 +146,7 @@
+ 
+         # Start the isolated session in its own process group
+         self._process = subprocess.Popen(
+-            ["dbus-run-session", "bash", "-c", wrapper_script],
++            ["bash", "-c", wrapper_script],
+             stdout=subprocess.PIPE,
+             stderr=subprocess.PIPE,
+             env=self._build_env(config),
+@@ -331,7 +331,25 @@
+     def _build_wrapper_script(self, config: SessionConfig) -> str:
+         """Build the bash script that runs inside dbus-run-session."""
+         return f"""\
+-echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS"
++__CFG="$(mktemp /tmp/kwin-mcp-dbus-XXXXXX.conf)"
++cat > "$__CFG" <<'DBUSCONF'
++<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN" "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
++<busconfig>
++  <type>session</type>
++  <listen>unix:tmpdir=/tmp</listen>
++  <standard_session_servicedirs/>
++  <policy context="default">
++    <allow send_destination="*" eavesdrop="true"/>
++    <allow eavesdrop="true"/>
++    <allow own="*"/>
++  </policy>
++</busconfig>
++DBUSCONF
++__ADDRFILE="$(mktemp)"
++dbus-daemon --config-file="$__CFG" --print-address --nofork >"$__ADDRFILE" 2>/dev/null &
++for __i in $(seq 1 100); do [ -s "$__ADDRFILE" ] && break; sleep 0.05; done
++export DBUS_SESSION_BUS_ADDRESS="$(cat "$__ADDRFILE")"
++echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS"
+ 
+ # Ensure all child processes are cleaned up on exit
+ cleanup() {{

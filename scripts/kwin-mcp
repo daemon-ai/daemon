@@ -6,4 +6,26 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# kwin-mcp invokes `kwin_wayland` by bare name. On NixOS the first PATH match is
+# the /run/wrappers setcap wrapper, which aborts with "failed to inherit
+# capabilities: Operation not permitted" when launched outside a login session
+# (as here, under the MCP host) — so the virtual compositor never starts. Shadow
+# it with the raw store binary the running system already provides (resolved at
+# runtime, so nothing host-specific is baked into the Nix store — the plan's
+# accepted host-KWin coupling). The raw binary simply skips the RT-priority
+# capability step and runs fine headless.
+kw="$(readlink -f /run/current-system/sw/bin/kwin_wayland 2>/dev/null || true)"
+if [ -n "$kw" ] && [ -x "$kw" ]; then
+  shim="$(mktemp -d)"
+  ln -sf "$kw" "$shim/kwin_wayland"
+  export PATH="$shim:$PATH"
+fi
+
+# Drive input through the accessibility layer: KWin EIS/libei segfaults on this
+# host and ydotool has no /dev/uinput access, so the stock backends are unusable.
+# The AT-SPI backend (kwin_mcp.atspi_input, injected at build time) needs no
+# privileges and works on Wayland.
+export KWIN_MCP_INPUT_BACKEND=atspi
+
 exec nix run "$root#kwin-mcp" -- "$@"

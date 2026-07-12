@@ -43,6 +43,40 @@ bundled-app wiring from warm debug builds:
 `just e2e` also runs against these incremental clients. None of this replaces the gates above —
 `just bundle` remains the sealed parity check before calling release work done.
 
+## Driving the GUI over accessibility (kwin-mcp)
+
+`kwin-mcp` (the Nix-packaged `.#kwin-mcp` server, launched via `scripts/kwin-mcp`) drives the real
+GUI through the AT-SPI accessibility tree the `daemon-app` annotations expose — for eyeballing a
+build or scripting agent GUI journeys. It runs the client in an isolated virtual KWin session
+(`session_start`, headless) or against the live desktop (`session_connect`, visible). Input is
+delivered through AT-SPI actions, not synthetic pointer/key events (`KWIN_MCP_INPUT_BACKEND=atspi`,
+set by the launcher). Requires KDE Plasma 6 / KWin on the host.
+
+Drive the **dynamic-Qt** client — it carries the accessibility bridge. The sealed static bundle
+(`bundled-app`) has no AT-SPI bridge (and doesn't render under a bare launch), so it is not the
+automation target; use `daemon-app#default`, which runs the same daemon-service experience:
+
+```
+nix build ./daemon-app#default --out-link result-app     # -> result-app/bin/daemon-app
+```
+
+Tool flow: `session_start` | `session_connect` -> `launch_app` -> `find_ui_elements` /
+`accessibility_tree` / `mouse_click` / `keyboard_type` / `screenshot` -> `session_stop`. The
+`launch_app` env selects the runtime:
+
+- Always: `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1 QT_ACCESSIBILITY=1`, and a throwaway
+  `HOME` + `XDG_{CONFIG,DATA,CACHE,STATE}_HOME` so it never touches a real profile.
+- Mock (hermetic, no node — deterministic GUI/a11y checks): `DAEMON_APP_SERVICE_MODE=mock`, and
+  seed the temp `HOME`'s `.config/daemon-app/daemon-app.conf` with `[app] setupComplete=true` and
+  `[conn] mode=mock target=ready` to land in the main shell (omit the seed for the mock first-run).
+- Daemon service (real co-packaged node — first-run wizard, integration smoke):
+  `DAEMON_APP_SERVICE_MODE=daemon`, `DAEMON_BIN=<a built daemon binary>` (e.g. from
+  `nix build '.?submodules=1#bundled-app'` or a `daemon-node` debug build) and optionally
+  `DAEMON_INFER__WORKER_BIN=<worker>`; a fresh temp `HOME` boots into the connection wizard.
+
+If an AT-SPI query reports "couldn't connect to accessibility bus", the session's a11y bus socket
+went stale — `systemctl --user restart at-spi-dbus-bus.service`.
+
 ## Commit signing — superproject (non-negotiable)
 
 Every commit in the **superproject** (this repo, the `.` bundle) MUST be GPG-signed. This is a
