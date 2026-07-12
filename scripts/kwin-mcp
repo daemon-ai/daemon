@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# kwin-mcp launcher for Cursor (referenced from .cursor/mcp.json).
+# Mirrors scripts/cs-mcp: self-contained so it works no matter how Cursor was
+# started. Runs the pinned, Nix-packaged kwin-mcp server (no host install) — the
+# KWin/Wayland GUI-automation MCP companion to the a11y-audit gate.
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec nix run "$root#kwin-mcp" -- "$@"

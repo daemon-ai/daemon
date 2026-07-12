@@ -32,6 +32,7 @@
     # working trees are populated. The codec outputs above do not use them, keeping codec-drift /
     # update-codec independent of the children's build closures.
     daemon-node.url = "path:./daemon-node";
+    daemon-node.inputs.llm-agents.follows = "llm-agents";
     daemon-app.url = "path:./daemon-app";
 
     # Prebuilt coding-agent CLIs (claude-code, codex, gemini-cli, opencode, ...) for the `agents`
@@ -191,6 +192,58 @@
             homepage = "https://github.com/trailofbits/mrva";
             license = lib.licenses.agpl3Plus;
             mainProgram = "mrva";
+          };
+        };
+
+        # kwin-mcp (https://github.com/isac322/kwin-mcp): an MCP server that drives a
+        # KWin/Wayland session over D-Bus + AT-SPI (window control, input injection,
+        # screenshots, accessibility tree) — the GUI-automation companion to the
+        # a11y-audit gate. Pure Python. Wired into Cursor via scripts/kwin-mcp +
+        # .cursor/mcp.json, mirroring the cs-mcp precedent; NO host installs.
+        #
+        # Upstream builds with the `uv_build` backend, which the pinned nixpkgs does
+        # not carry, so install the published pure-python wheel directly
+        # (format = "wheel") rather than building from the sdist. GI-based: it
+        # resolves the Atspi-2.0 + GLib typelibs through gobject-introspection at
+        # import time, so wrap GI_TYPELIB_PATH onto the console scripts.
+        kwin-mcp = pkgs.python3Packages.buildPythonApplication rec {
+          pname = "kwin-mcp";
+          version = "0.7.0";
+          format = "wheel";
+          src = pkgs.fetchurl {
+            url = "https://files.pythonhosted.org/packages/d4/26/c57e82a8c17029b647ff2ba357e590c683e7f12db4aa631ba678ef5de6b1/kwin_mcp-${version}-py3-none-any.whl";
+            hash = "sha256-9BdbNqKGmpxN+q15kskFqXsRvVpQeecT7iAyEidCRVk=";
+          };
+          # gobject-introspection provides the GI runtime; at-spi2-core + glib carry
+          # the typelibs kwin_mcp.accessibility imports (Atspi-2.0, GLib/GObject/Gio).
+          nativeBuildInputs = [ pkgs.gobject-introspection ];
+          dependencies = with pkgs.python3Packages; [
+            mcp
+            pygobject3
+            dbus-python
+            pillow
+          ];
+          # No import check: kwin_mcp.accessibility calls gi.require_version("Atspi")
+          # at module load, which needs the wrapped typelib path (set below), absent
+          # from the bare build-check env.
+          dontUsePythonImportsCheck = true;
+          makeWrapperArgs = [
+            "--prefix GI_TYPELIB_PATH : ${
+              lib.makeSearchPath "lib/girepository-1.0" [
+                pkgs.at-spi2-core
+                pkgs.glib
+                pkgs.gobject-introspection
+              ]
+            }"
+            # kwin_mcp.input dlopens libei.so.1 (Wayland/libei input emulation) via
+            # ctypes at import time; put it on the loader path.
+            "--prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath [ pkgs.libei ]}"
+          ];
+          meta = {
+            description = "MCP server for KWin/Wayland automation (window control, input, screenshots, AT-SPI)";
+            homepage = "https://github.com/isac322/kwin-mcp";
+            license = lib.licenses.mit;
+            mainProgram = "kwin-mcp";
           };
         };
 
@@ -758,6 +811,23 @@
         vendoredCodec = ./daemon-app/src/core/daemon/codec/generated;
         vendoredRuntime = ./daemon-app/src/core/daemon/codec/vendor;
 
+        # The SECOND emitter on this pipeline (spec 09 §3.6 / ADR-004): CDDL + the human-owned
+        # entity map -> vendored Q_GADGET entity artifacts, drift-gated exactly like the zcbor codec.
+        # The generator lives beside zcbor-codegen.sh in daemon-node (contract-owning repo); the map
+        # and the generated artifacts live in daemon-app.
+        mirrorCodegenDir = ./daemon-node/crates/contracts/daemon-api/mirror-codegen;
+        entityMap = ./daemon-app/src/core/mirror/entity-map.toml;
+        vendoredMirror = ./daemon-app/src/core/mirror/generated;
+        mirrorMapCpp = ./daemon-app/src/core/mirror/entities_map.cpp;
+        # The four byte-identical (drift-checked) mirror artifacts; entities_map.cpp is human-owned
+        # (signature-checked only, never byte-compared) and so is NOT in this list.
+        mirrorFiles = [
+          "entities_gen.h"
+          "entities_provenance_gen.h"
+          "entities_map_gen.h"
+          "mirror_schema_gen.sql"
+        ];
+
         codecFiles = [
           "daemon_api_client_decode.c"
           "daemon_api_client_decode.h"
@@ -790,10 +860,24 @@
             mkdir -p "$out"
             bash ${codegenScript} ${apiCddl} "$out" --copy-sources
           '';
+
+        # Pure mirror-entity codegen: the pinned CDDL + entity map -> the four vendored artifacts,
+        # in the store. Pure Python stdlib (tomllib + a small CDDL member index); no third-party
+        # deps, so the drift gate is deterministic. Nothing here mutates the working tree.
+        daemon-mirror-entities = pkgs.runCommand "daemon-mirror-entities"
+          {
+            nativeBuildInputs = [ pkgs.python3 ];
+          }
+          ''
+            mkdir -p "$out"
+            python3 ${mirrorCodegenDir}/entity_codegen.py \
+              --cddl ${apiCddl} --map ${entityMap} --out "$out"
+          '';
       in
       {
         packages = {
           inherit daemon-zcbor-codec;
+          inherit daemon-mirror-entities;
           default = daemon-zcbor-codec;
 
           # Integration bundles: the GUI/TUI client with the daemon host binary co-packaged so
@@ -822,6 +906,10 @@
           package-nsis = bundledNsis;
           package-portable = bundledPortable;
           package-portable-tarball = bundledPortableTarball;
+
+          # kwin-mcp: the KWin/Wayland GUI-automation MCP server (see the derivation
+          # above). Launched by scripts/kwin-mcp and referenced from .cursor/mcp.json.
+          inherit kwin-mcp;
         }
         # macOS DMG with the node bundle embedded, built on a mac host only
         # (aarch64-darwin). `just package-dmg` / `nix build '.?submodules=1#package-dmg'`.
@@ -846,11 +934,22 @@
             }
             check ${vendoredCodec} generated ${pkgs.lib.concatStringsSep " " codecFiles}
             check ${vendoredRuntime} vendor ${pkgs.lib.concatStringsSep " " runtimeFiles}
+            # Mirror entity artifacts (spec §3.6): byte-identical regeneration of the four artifacts,
+            # provenance completeness + CDDL grounding (re-run inside the generator), the
+            # no-client_local-in-a-mirror-table rule, and mapper signature match vs the vendored
+            # codec types. entity_drift.py imports entity_codegen.py from the same store dir.
+            if ! ${pkgs.python3}/bin/python3 ${mirrorCodegenDir}/entity_drift.py \
+                 --cddl ${apiCddl} --map ${entityMap} \
+                 --generated-dir ${vendoredMirror} --map-cpp ${mirrorMapCpp} \
+                 --types-header ${vendoredCodec}/daemon_api_client_types.h; then
+              echo "DRIFT: vendored mirror entity artifacts differ from generated" >&2
+              fail=1
+            fi
             if [ "$fail" -ne 0 ]; then
-              echo "vendored codec/runtime is stale vs the pinned daemon-node contract; run: nix run .#update-codec" >&2
+              echo "vendored codec/runtime/mirror is stale vs the pinned daemon-node contract; run: nix run .#update-codec" >&2
               exit 1
             fi
-            echo "vendored codec + runtime match the generated output"
+            echo "vendored codec + runtime + mirror entities match the generated output"
             touch "$out"
           '';
         };
@@ -912,6 +1011,24 @@
                       install -m644 "${daemon-zcbor-codec}/$f" "$vendest/$f"
                     done
                     echo "updated $gendest + $vendest from ${daemon-zcbor-codec}"
+
+                    # Mirror entity artifacts (spec §3.6, the second emitter).
+                    mirdest="daemon-app/src/core/mirror/generated"
+                    if [ ! -d "$mirdest" ]; then
+                      echo "run from the superproject root (missing mirror dir)" >&2
+                      exit 1
+                    fi
+                    for f in ${pkgs.lib.concatStringsSep " " mirrorFiles}; do
+                      install -m644 "${daemon-mirror-entities}/$f" "$mirdest/$f"
+                    done
+                    # The one-time mapper skeleton is human-owned: bootstrap it only when absent;
+                    # regeneration NEVER overwrites it (the drift gate checks signatures, not bodies).
+                    if [ ! -f "daemon-app/src/core/mirror/entities_map.cpp" ]; then
+                      ${pkgs.python3}/bin/python3 ${mirrorCodegenDir}/entity_codegen.py \
+                        --cddl ${apiCddl} --map ${entityMap} \
+                        --emit-skeleton "daemon-app/src/core/mirror/entities_map.cpp"
+                    fi
+                    echo "updated $mirdest from ${daemon-mirror-entities}"
                   '';
                 };
               in

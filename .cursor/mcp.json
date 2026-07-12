@@ -2,6 +2,9 @@
   "mcpServers": {
     "codescene": {
       "command": "${workspaceFolder}/scripts/cs-mcp"
+    },
+    "kwin-mcp": {
+      "command": "${workspaceFolder}/scripts/kwin-mcp"
     }
   }
 }

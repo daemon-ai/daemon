@@ -103,7 +103,10 @@ fn tui_offscreen_initializes_in_daemon_mode() {
 
 /// Hard-assert connectivity: with DAEMON_APP_WAIT_READY the GUI blocks until its Health round-trip
 /// resolves, so we can assert both the readiness sentinel and that the daemon observed Health plus
-/// the auto SessionsQuery that fires once the connection is ready.
+/// the node-feed read (`EventsSince`) that opens once the connection is ready. The mirror
+/// architecture deleted the legacy connect-ready SessionsQuery storm (07§5.2): session state now
+/// arrives through the subscribed feed + the ingestor's demand-driven fetch queue (Bootstrap →
+/// since_rev deltas), so the feed read is the ready-behavior contract observable at the socket.
 #[test]
 fn gui_daemon_mode_reaches_ready_and_queries_sessions() {
     if !have_daemon() {
@@ -139,14 +142,14 @@ fn gui_daemon_mode_reaches_ready_and_queries_sessions() {
         .expect("GUI sent a Health probe");
     proxy
         .wait_for_request(
-            |r| matches!(r, ApiRequest::SessionsQuery { .. }),
+            |r| matches!(r, ApiRequest::EventsSince { .. }),
             Duration::from_secs(2),
         )
-        .expect("GUI sent a SessionsQuery once ready");
+        .expect("GUI opened the node event feed once ready");
 }
 
 /// Same hard-assert for the TUI: the readiness block makes the Health probe assertable (previously
-/// only logged), and the auto SessionsQuery on ready is observed at the socket.
+/// only logged), and the node-feed read (`EventsSince`) on ready is observed at the socket.
 #[test]
 fn tui_daemon_mode_reaches_ready_and_queries_sessions() {
     if !have_daemon() {
@@ -182,8 +185,8 @@ fn tui_daemon_mode_reaches_ready_and_queries_sessions() {
         .expect("TUI sent a Health probe");
     proxy
         .wait_for_request(
-            |r| matches!(r, ApiRequest::SessionsQuery { .. }),
+            |r| matches!(r, ApiRequest::EventsSince { .. }),
             Duration::from_secs(2),
         )
-        .expect("TUI sent a SessionsQuery once ready");
+        .expect("TUI opened the node event feed once ready");
 }
