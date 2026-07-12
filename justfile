@@ -391,7 +391,7 @@ dev-run:
     #    + Ninja + TUI). The configure is idempotent against the existing cache; building just the
     #    `daemon-app` target keeps the loop fast (the default target set also builds every unit-test
     #    executable - minutes of work the dev loop does not need).
-    ( cd daemon-app && nix develop --command sh -c 'cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DDAEMON_APP_TUI=ON && cmake --build build --target daemon-app' )
+    ( cd daemon-app && nix develop --command sh -c 'cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DDAEMON_APP_TUI=ON -DDAEMON_APP_QML_DEBUG=OFF -DCMAKE_LINKER_TYPE=MOLD && cmake --build build --target daemon-app' )
     # 5) Launch the GUI in daemon service mode with the bundle env vars, from inside the daemon-app
     #    devShell (which supplies QT_PLUGIN_PATH / QML_IMPORT_PATH). The daemon it spawns is the
     #    .dev wrapper; the worker is the debug daemon-infer.
