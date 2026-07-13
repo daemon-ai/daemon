@@ -137,6 +137,12 @@ systems enrich it with a git build-metadata suffix (`X.Y.Z+<n>.g<hash>[.dirty]`,
 clean tag). Bump through the recipes — never hand-edit the derived copies
 (`daemon-node/Cargo.toml`, `daemon-app/packaging/UPDATES.json`).
 
+**Agents MUST NOT bump or otherwise change any version unless the human explicitly asks for a
+version bump.** That covers every `VERSION` file, `just set-version`, `just release`, and the
+derived mirrors — in all three repos. Landing a feature is NEVER an implicit reason to bump;
+"finishing" work does not include versioning it. If a change seems to warrant a bump (e.g. a wire
+or packaging change), say so in your summary and let the human decide.
+
 - `just version`                    # print node / app / bundle versions (+ api/mux wire versions)
 - `just set-version <repo> <X.Y.Z>` # write <repo>/VERSION and mechanically sync its mirrors
 - `just check-version`              # gate (part of `just lint`): SemVer + node VERSION == Cargo version
