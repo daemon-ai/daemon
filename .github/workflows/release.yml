@@ -192,19 +192,23 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-  # macOS DMG (aarch64-darwin) — runs on the self-hosted M1 mini. `package-dmg` IS wired now (the
-  # superproject bundledDmg -> daemon-app's static-Qt macos-dmg; see flake.nix), so this builds the
-  # real drag-and-drop .dmg. It stays DISABLED until two out-of-band steps are done (deliberately a
-  # repo-var gate, not `if: false`, so enabling is a settings change and actionlint stays clean):
-  #   1. Register the mini as a self-hosted Actions runner with the labels
-  #      [self-hosted, macOS, ARM64] (Settings -> Actions -> Runners). Cap it on the 8 GB mini via
-  #      the daemon's nix.conf (max-jobs = 1, cores = 4) — this job also pins --max-jobs 1 --cores 4.
-  #   2. Set the repo variable ENABLE_MACOS_RELEASE=true.
-  # No DeterminateSystems installer / cachix-action here: the mini already has nix + a warm store
-  # (adding a cachix PUSH step later is optional and out of scope for a self-hosted lane).
+  # macOS DMG (aarch64-darwin). `package-dmg` IS wired now (the superproject bundledDmg ->
+  # daemon-app's static-Qt macos-dmg; see flake.nix), so this builds the real drag-and-drop .dmg.
+  # Gated on the repo variable ENABLE_MACOS_RELEASE=true (deliberately a repo-var gate, not
+  # `if: false`, so enabling is a settings change and actionlint stays clean).
+  #
+  # Runner selection — GH-hosted by default, self-hosted opt-in:
+  #   - Default: GitHub-hosted `macos-14` (Apple Silicon). Nix is installed on the fly and the
+  #     daemon-ai cachix substituter is used; the FIRST uncached run rebuilds static Qt from
+  #     source (hours) — seed the cache by pushing a build from the M1 mini first.
+  #   - Override: set the repo variable MACOS_RUNNER to a JSON label array, e.g.
+  #     ["self-hosted","macOS","ARM64"], after registering the M1 mini as a self-hosted runner
+  #     (Settings -> Actions -> Runners). Cap the mini via its nix.conf (max-jobs = 1, cores = 4);
+  #     this job also pins --max-jobs 1 --cores 4 for the 8 GB box. The nix-installer/cachix
+  #     steps auto-skip on self-hosted (nix + warm store already there).
   macos:
     if: ${{ vars.ENABLE_MACOS_RELEASE == 'true' }}
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: ${{ fromJSON(vars.MACOS_RUNNER || '"macos-14"') }}
     env:
       SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
       SENTRY_ORG: daemon-ai
@@ -213,6 +217,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+      # GH-hosted runners start bare; the self-hosted mini already has nix + a warm store.
+      - uses: DeterminateSystems/nix-installer-action@main
+        if: ${{ runner.environment == 'github-hosted' }}
+      - uses: cachix/cachix-action@v15
+        if: ${{ runner.environment == 'github-hosted' }}
+        with:
+          name: daemon-ai
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
       - name: Build macOS DMG
         run: |
           # Sealed bundle lane, capped hard for the 8 GB mini (resource discipline: never a bare
