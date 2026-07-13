@@ -50,7 +50,9 @@ printf '%s\n' "${FILES[@]}" | nix develop "$FLAKE" --command bash -euo pipefail 
   gitleaks protect --staged --no-banner --redact
 
   echo "[pre-commit] typos…"
-  printf "%s\n" "${files[@]}" | xargs -r typos --
+  # --force-exclude: honor .typos.toml extend-exclude even for explicit paths
+  # (vendored files like packaging/flatpak/tools are excluded, not spell-fixed).
+  printf "%s\n" "${files[@]}" | xargs -r typos --force-exclude --
 
   case "$LANG_KIND" in
     rust)

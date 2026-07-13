@@ -16,6 +16,11 @@ extend-exclude = [
   # spellings ("publically", "cannonical") are not ours to fix.
   "**/src/core/update/vendor/**",
   "**/src/tools/updater/vendor/**",
+  # Vendored flatpak-builder-tools cargo generator (pinned upstream script):
+  # upstream typos ("fragement") are not ours to fix.
+  "**/packaging/flatpak/tools/**",
+  # Generated cargo vendoring manifest (crate names + sha256s), not hand-authored.
+  "**/packaging/flatpak/cargo-sources.json",
   "*.lock",
   # Shipped translation catalogs: the <translation> text is non-English by design
   # and would otherwise trip the spell gate. The English <source> lives in the

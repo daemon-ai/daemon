@@ -1149,6 +1149,25 @@
           ];
         };
 
+        # Flatpak packaging toolchain (packaging/flatpak). Everything the flatpak recipes need:
+        # flatpak-builder builds the manifest from source inside org.kde.Sdk; python3 (with the
+        # cargo generator's deps) regenerates cargo-sources.json; appstream + desktop-file-utils
+        # validate the metadata. `flatpak-builder-lint` itself ships inside the org.flatpak.Builder
+        # flatpak (see `just flatpak-lint`), not here. Enter with `nix develop .#flatpak`.
+        devShells.flatpak = pkgs.mkShell {
+          packages = [
+            pkgs.flatpak
+            pkgs.flatpak-builder
+            pkgs.appstream
+            pkgs.desktop-file-utils
+            # aiohttp/pyyaml/tomlkit back tools/flatpak-cargo-generator.py so
+            # `just flatpak-cargo-sources` runs offline (bar the one git dep clone).
+            (pkgs.python3.withPackages (ps: with ps; [ aiohttp pyyaml tomlkit ]))
+            pkgs.just
+            pkgs.jq
+          ];
+        };
+
         # Foreign-agent CLIs on PATH for whole-product e2e: run a bundled node from the superproject
         # (`nix run '.?submodules=1#bundled-app'`) inside this shell so its ACP discovery
         # (`daemon_acp::AcpDiscoverer`) probes real coding-agent binaries. Mirrors daemon-node's

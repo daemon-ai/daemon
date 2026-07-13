@@ -1016,3 +1016,72 @@ mrva-scan queries:
     nix develop .#review --command bash -euo pipefail -c '\
       mrva analyze .mrva {{queries}} -- --rerun --threads=0; \
       mrva pprint .mrva'
+
+# --- flatpak packaging (packaging/flatpak; superproject files stay uncommitted) ---
+# Flathub-grade from-source Flatpak: org.kde.Sdk 6.11 runtime Qt, all four binaries in
+# /app/bin. Tooling comes from the `.#flatpak` devShell (`nix develop .#flatpak`);
+# flatpak-builder-lint ships inside the org.flatpak.Builder flatpak (installed from
+# flathub on demand). See packaging/flatpak/README.md for the full contract.
+
+MANIFEST := "packaging/flatpak/ai.daemon.app.yml"
+
+# Extra flatpak-builder flags. Defaults to --disable-rofiles-fuse because the
+# `.#flatpak` devShell's fusermount3 is not setuid and FUSE mounts are blocked in
+# the sandboxed/CI environments this is driven from ("Failure spawning
+# rofiles-fuse"). rofiles-fuse only guards a module against writing outside its
+# prefix mid-build; disabling it does not change the produced artifact. On a host
+# with working FUSE (e.g. Flathub's own builder) override with an empty value:
+# `just FLATPAK_BUILDER_EXTRA= flatpak-build`.
+FLATPAK_BUILDER_EXTRA := "--disable-rofiles-fuse"
+
+# Build + install the app into the user flatpak installation. First run pulls
+# org.kde.{Platform,Sdk} 6.11 and the rust-stable/llvm SDK extensions from flathub.
+flatpak-build:
+    nix develop .#flatpak --command flatpak-builder --user --install --force-clean \
+      {{FLATPAK_BUILDER_EXTRA}} --install-deps-from=flathub build/flatpak {{MANIFEST}}
+
+# Run the installed app.
+flatpak-run:
+    flatpak run ai.daemon.app
+
+# Build into a local OCI repo and export a single-file distributable .flatpak bundle.
+flatpak-bundle:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    nix develop .#flatpak --command bash -euo pipefail -c '
+      flatpak-builder --user --force-clean {{FLATPAK_BUILDER_EXTRA}} --repo=build/flatpak-repo \
+        --install-deps-from=flathub build/flatpak {{MANIFEST}}
+      flatpak build-bundle build/flatpak-repo build/ai.daemon.app.flatpak ai.daemon.app
+      echo "wrote build/ai.daemon.app.flatpak"
+    '
+
+# Lint the manifest (+ the exported repo if present) with flatpak-builder-lint, then
+# validate the (configured) metainfo + desktop files. flatpak-builder-lint lives in the
+# org.flatpak.Builder flatpak; it is installed from flathub if absent.
+flatpak-lint:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    flatpak install -y --user flathub org.flatpak.Builder >/dev/null 2>&1 || true
+    flatpak run --command=flatpak-builder-lint org.flatpak.Builder manifest {{MANIFEST}}
+    if [ -d build/flatpak-repo ]; then
+      flatpak run --command=flatpak-builder-lint org.flatpak.Builder repo build/flatpak-repo
+    fi
+    nix develop .#flatpak --command bash -euo pipefail -c '
+      tmp=$(mktemp -d)
+      # The metainfo is a CMake template (@PROJECT_VERSION@/@DAEMON_APP_METAINFO_DATE@);
+      # substitute dummies so appstreamcli sees a well-formed component.
+      sed -e "s/@PROJECT_VERSION@/0.0.0/" -e "s/@DAEMON_APP_METAINFO_DATE@/2026-01-01/" \
+        daemon-app/packaging/linux/ai.daemon.app.metainfo.xml.in \
+        > "$tmp/ai.daemon.app.metainfo.xml"
+      echo "== appstreamcli validate =="
+      appstreamcli validate --explain "$tmp/ai.daemon.app.metainfo.xml" || \
+        echo "(appstream findings above are pre-submission TODOs; see README)"
+      echo "== desktop-file-validate =="
+      desktop-file-validate daemon-app/packaging/linux/daemon-app.desktop
+    '
+
+# Regenerate packaging/flatpak/cargo-sources.json from daemon-node/Cargo.lock (offline
+# except the single git-dependency clone). Vendored generator: packaging/flatpak/tools.
+flatpak-cargo-sources:
+    nix develop .#flatpak --command python3 packaging/flatpak/tools/flatpak-cargo-generator.py \
+      daemon-node/Cargo.lock -o packaging/flatpak/cargo-sources.json

@@ -1,0 +1,357 @@
+# Flatpak manifest for the Daemon product (GUI thin client + co-packaged node).
+#
+# Builds entirely from source inside org.kde.Sdk 6.11 (prebuilt shared Qt 6.11,
+# Qt5Compat included), per Flathub rules. The app is the existing shared-Qt dev
+# configuration (DAEMON_APP_STATIC=OFF, the same build `daemon-app#default` /
+# `just dev-run` exercise) — static Qt stays the AppImage/deb/rpm/portable story
+# where no runtime exists. All four binaries land in /app/bin so the app's
+# sibling discovery (LocalDaemonLauncher::discoverDaemonBinary) and the node's
+# default_worker_bin() resolve daemon / daemon-infer / daemon-cli with no code
+# change.
+#
+# Local dev: sources are `type: dir` pointing at the sibling checkouts
+# (../../daemon-node, ../../daemon-app). See the `# Flathub:` note on each such
+# source for the pinned `type: git` (tag + commit) swap required for submission.
+#
+# GPU: this manifest ships the Vulkan-accelerated llama.cpp lane
+# (GGML_VULKAN=ON). No Flatpak extension and no source-built shader COMPILER are
+# needed: org.freedesktop.Sdk 25.08 (the base org.kde.Sdk 6.11 is built on)
+# already provides glslc (shaderc), glslang/SPIRV-Tools, the Vulkan headers
+# (<vulkan/vulkan.h>, pkg-config vulkan), and the unversioned libvulkan.so dev
+# symlink, so llama.cpp compiles its SPIR-V shaders in place at build time. The
+# ONE thing the SDK omits is the header-only SPIRV-Headers CMake package that
+# ggml's shader generator find_package()s — built from source as the tiny
+# `spirv-headers` module below (pruned at runtime). Runtime split:
+# the Vulkan loader (libvulkan.so.1) comes from org.kde.Platform, the ICDs (GPU
+# drivers) from the auto-selected org.freedesktop.Platform.GL.* extension, and
+# the device nodes via --device=dri. Offload is opt-in and degrades to CPU when
+# no device is present (the node defaults n_gpu_layers = 0; override with
+# DAEMON_INFER__N_GPU_LAYERS). CUDA stays deferred (no Flathub CUDA SDK
+# extension). See packaging/flatpak/README.md ("GPU (Vulkan)").
+
+id: ai.daemon.app
+runtime: org.kde.Platform
+runtime-version: '6.11'
+sdk: org.kde.Sdk
+
+# Rust toolchain + libclang (bindgen, for llama-cpp-sys-4 / daemon-infer). Their
+# branch tracks the freedesktop base org.kde.Sdk 6.11 is built on; bump llvm to
+# match if the runtime rebases (llvm20 is published for both 24.08 and 25.08).
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.llvm20
+
+command: daemon-app
+
+finish-args:
+  # Display + GPU. Wayland-first, X11 fallback; --device=dri exposes the GPU
+  # device nodes, and the auto-pulled org.freedesktop.Platform.GL.* extension
+  # supplies the Vulkan ICDs the enabled llama.cpp Vulkan backend loads (the
+  # loader itself ships in the Platform). No device -> graceful CPU fallback.
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+  # HF model downloads, provider APIs, chat adapters, and the swarm transport.
+  - --share=network
+  # qtkeychain server-token store -> the Secret Service (org.freedesktop.secrets).
+  - --talk-name=org.freedesktop.secrets
+  # Launch-at-login uses the Background portal (autostart_backend_portal.cpp:
+  # RequestBackground). No talk-name is needed: the portal frontend is always
+  # reachable, and flatpak-builder-lint rejects an explicit portal talk-name.
+  # No --filesystem grants: config/data/cache/socket all resolve inside the
+  # per-app sandbox (~/.var/app/ai.daemon.app/...); see packaging/flatpak/README.md.
+
+# Build-wide toolchain env: Rust + libclang on PATH/where bindgen looks. Applied
+# to every module; the Rust modules add their own CARGO_HOME / prebuilt vars.
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm20/bin
+  env:
+    LIBCLANG_PATH: /usr/lib/sdk/llvm20/lib
+
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /lib/cmake
+  - /mkspecs
+  - '*.a'
+  - '*.la'
+
+modules:
+  # --- Shared-Qt deltas the runtime does not provide -----------------------
+
+  # MicroTeX (built inside daemon-app) links tinyxml2 via pkg-config.
+  - name: tinyxml2
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DBUILD_SHARED_LIBS=ON
+      - -Dtinyxml2_BUILD_TESTING=OFF
+    sources:
+      - type: git
+        url: https://github.com/leethomason/tinyxml2.git
+        tag: '11.0.0'
+        commit: 9148bdf719e997d1f474be6bcc7943881046dba1
+
+  # OS-keychain server-token store (auth6). daemon-app's find_package(Qt6Keychain)
+  # picks it up; absent, the app falls back to a QSettings token store.
+  - name: qtkeychain
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DBUILD_WITH_QT6=ON
+      - -DBUILD_TESTING=OFF
+    sources:
+      - type: git
+        url: https://github.com/frankosterfeld/qtkeychain.git
+        tag: '0.17.0'
+        commit: 875f77d9f61bd97fd84cca47ce3bc71186dfbd09
+
+  # Embedded terminal QML plugin (import QMLTermWidget), used by the GUI Terminal
+  # panel. qmake project; redirect its $$[QT_INSTALL_QML] (a read-only /usr path
+  # in the runtime) to /app/lib/qml, which is on the runtime's QML import path.
+  - name: qmltermwidget
+    buildsystem: qmake
+    sources:
+      - type: git
+        url: https://github.com/Swordfish90/qmltermwidget.git
+        commit: 8913504fa2ebd220ebe7c680c32954e1b3c035c5
+      - type: shell
+        commands:
+          - sed -i 's|\$\$\[QT_INSTALL_QML\]|/app/lib/qml|g' qmltermwidget.pro
+
+  # SPIR-V headers for the Vulkan llama.cpp lane. ggml's Vulkan backend runs
+  # `find_package(SPIRV-Headers CONFIG REQUIRED)` (its vulkan-shaders-gen tool
+  # includes the SPIR-V enum definitions). org.kde.Sdk 6.11 ships the shader
+  # *compiler* toolchain (glslc/shaderc + glslang/SPIRV-Tools binaries) and the
+  # Vulkan loader/headers, but NOT the SPIRV-Headers CMake package — so build it
+  # from the pinned Khronos release that matches the SDK's Vulkan (1.4.321). This
+  # is header-only: the installed /include + /lib/cmake are dropped by `cleanup`,
+  # so nothing lands at runtime. (It is not a shader toolchain — that stays the
+  # SDK's; see the GPU note in the header.)
+  - name: spirv-headers
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+    sources:
+      - type: git
+        url: https://github.com/KhronosGroup/SPIRV-Headers.git
+        tag: vulkan-sdk-1.4.321.0
+        commit: 2a611a970fdbc41ac2e3e328802aed9985352dca
+
+  # --- Inference engine (Vulkan-accelerated; see GPU note in the header) ----
+
+  # From-source shared llama.cpp at the exact commit llama-cpp-sys-4 0.3.2
+  # vendors, so daemon-infer's `dynamic-link` prebuilt mode is ABI-compatible.
+  # Installed into a private prefix (/app/llama) so the crate's prebuilt glob of
+  # $LLAMA_PREBUILT_DIR/lib sees ONLY the core llama/ggml/mtmd libs (not the
+  # unrelated /app/lib libs); the daemon-node module copies the runtime .so set
+  # into /app/lib afterwards so the loader resolves them.
+  - name: llama-cpp
+    buildsystem: cmake-ninja
+    build-options:
+      prefix: /app/llama
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DBUILD_SHARED_LIBS=ON
+      - -DGGML_NATIVE=OFF
+      # Vulkan backend ON: the SDK ships glslc + Vulkan headers + libvulkan.so
+      # dev symlink, so ggml compiles its SPIR-V shaders and builds
+      # libggml-vulkan.so in place (see the GPU note in the header). GGML_NATIVE
+      # stays OFF (portable ISA baseline); only the GPU lane is added.
+      - -DGGML_VULKAN=ON
+      - -DLLAMA_CURL=OFF
+      - -DLLAMA_BUILD_TESTS=OFF
+      - -DLLAMA_BUILD_EXAMPLES=OFF
+      - -DLLAMA_BUILD_SERVER=OFF
+      # The unified `llama` binary (app/) unconditionally links the cli/server
+      # impl libs, which only build under LLAMA_BUILD_SERVER=ON — so with SERVER
+      # OFF its link fails. We don't ship that binary (daemon-infer links the
+      # llama/ggml/mtmd libraries, not a CLI), so build it OFF. TOOLS stays ON
+      # for libmtmd (tools/mtmd) which the mtmd feature needs.
+      - -DLLAMA_BUILD_APP=OFF
+      - -DLLAMA_BUILD_TOOLS=ON
+      - -DLLAMA_BUILD_COMMON=ON
+      - -DMTMD_VIDEO=OFF
+    # Prune /app/llama/lib to the core runtime libs the sys crate should link
+    # (llama / ggml* / mtmd): LLAMA_BUILD_TOOLS=ON also installs tool-support
+    # byproducts, and the crate's prebuilt mode globs + links every .so here.
+    post-install:
+      - |
+        set -eu
+        # Log record: the SDK-provided shader compiler ggml used for its SPIR-V
+        # shaders (proves the toolchain resolved; the real proof is the Vulkan
+        # backend .so surviving the prune below).
+        echo "llama-cpp: shader compiler = $(glslc --version 2>/dev/null | head -1 || echo 'glslc not on PATH')"
+        for f in /app/llama/lib/*; do
+          bn="$(basename "$f")"
+          case "$bn" in
+            libllama.so*|libggml*.so*|libmtmd.so*) ;;
+            *) echo "prune: removing non-core $bn"; rm -rf "$f" ;;
+          esac
+        done
+        test -n "$(find /app/llama/lib -maxdepth 1 -name 'libmtmd.so*' -print -quit)" \
+          || { echo "FATAL: libmtmd.so missing"; ls -la /app/llama/lib; exit 1; }
+        # Vulkan backend fatal check (mirror of the libmtmd guard): GGML_VULKAN=ON
+        # MUST have produced libggml-vulkan.so. A silently CPU-only build (e.g. the
+        # SDK's glslc/headers went missing) fails loudly here instead of shipping.
+        test -n "$(find /app/llama/lib -maxdepth 1 -name 'libggml-vulkan.so*' -print -quit)" \
+          || { echo "FATAL: libggml-vulkan.so missing (Vulkan backend did not build)"; ls -la /app/llama/lib; exit 1; }
+    sources:
+      - type: git
+        url: https://github.com/ggml-org/llama.cpp.git
+        commit: 94a220cd6745e6e3f8de62870b66fd5b9bc92700
+
+  # --- Node (Rust backend): daemon + daemon-cli + daemon-infer --------------
+
+  # Cargo vendoring comes from cargo-sources.json (generated from
+  # daemon-node/Cargo.lock by tools/flatpak-cargo-generator.py; regenerate with
+  # `just flatpak-cargo-sources`). It drops cargo/config + cargo/vendor into the
+  # build dir; CARGO_HOME points cargo at that offline config.
+  - name: daemon-node
+    buildsystem: simple
+    build-options:
+      env:
+        CARGO_HOME: /run/build/daemon-node/cargo
+        # Version string: intentionally NOT injected. daemon-common's build.rs
+        # derives the `+<n>.g<hash>[.dirty]` build-metadata suffix from `git
+        # describe` when the source provides `.git` (the Flathub `type: git`
+        # release source), and falls back to the bare SemVer from Cargo/VERSION
+        # when it does not (this local `type: dir` source, which skips `.git`).
+        # daemon-infer links the prebuilt shared llama.cpp (skips cmake); the
+        # crate reads $LLAMA_PREBUILT_DIR/{lib,include}.
+        LLAMA_PREBUILT_DIR: /app/llama
+        LLAMA_PREBUILT_SHARED: '1'
+    build-commands:
+      # daemon host with the CDP `browser` tool (vendored OpenSSL needs perl,
+      # in the SDK). daemon-cli operator CLI. daemon-infer multimodal llama
+      # worker linked against the prebuilt shared llama.cpp.
+      - cargo --offline build --release -p daemon --features browser
+      - cargo --offline build --release -p daemon-cli
+      - cargo --offline build --release -p daemon-infer --features llama,mtmd,dynamic-link
+      - install -Dm755 target/release/daemon /app/bin/daemon
+      - install -Dm755 target/release/daemon-cli /app/bin/daemon-cli
+      - install -Dm755 target/release/daemon-infer /app/bin/daemon-infer
+      # Put the llama runtime libs on the default loader path (/app/lib) so the
+      # dynamically-linked worker resolves libllama/libggml*/libmtmd at run time.
+      - cp -a /app/llama/lib/*.so* /app/lib/
+    sources:
+      # Flathub: replace with
+      #   - type: git
+      #     url: https://github.com/daemon-ai/daemon.git   # (the daemon-node repo)
+      #     tag: vX.Y.Z
+      #     commit: <full sha>
+      - type: dir
+        path: ../../daemon-node
+        skip:
+          - target
+          - .git
+      - cargo-sources.json
+
+  # --- App (Qt 6 GUI thin client) -------------------------------------------
+
+  # Shared-Qt configure mirroring packages.default (DAEMON_APP_STATIC=OFF), minus
+  # Nix store paths. TUI is OFF for this first cut (shrinks the manifest: no
+  # termpaint/posixsignalmanager/tuiwidgets Meson stack); see README. The vendored
+  # dep sources are pinned from daemon-app/flake.lock and passed via the existing
+  # -D<DEP>_SOURCE_DIR flags (Dependencies.cmake: no FetchContent): six header/
+  # source trees (md4qt/earcut/ksyntaxhighlighting/microtex/qrcodegen/immer) plus
+  # the sentry-native release tarball for crash reporting. The desktop-only deps
+  # (QWindowKit/updater/autostart/shortcut) are gated OFF by default
+  # (DAEMON_APP_DESKTOP_DEPS), so they are not needed.
+  - name: daemon-app
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DDAEMON_APP_STATIC=OFF
+      - -DDAEMON_APP_TUI=OFF
+      # Version string: intentionally NOT injected. cmake/Version.cmake reads
+      # the VERSION file live and derives the `+<n>.g<hash>[.dirty]` suffix from
+      # `git describe` when `.git` is present (Flathub `type: git` source),
+      # falling back to the bare SemVer here (dir source skips `.git`).
+      - -DMD4QT_SOURCE_DIR=/run/build/daemon-app/_flatpak_deps/md4qt
+      - -DEARCUT_SOURCE_DIR=/run/build/daemon-app/_flatpak_deps/earcut
+      - -DKSYNTAXHIGHLIGHTING_SOURCE_DIR=/run/build/daemon-app/_flatpak_deps/ksyntaxhighlighting
+      - -DMICROTEX_SOURCE_DIR=/run/build/daemon-app/_flatpak_deps/microtex
+      - -DQRCODEGEN_SOURCE_DIR=/run/build/daemon-app/_flatpak_deps/qrcodegen
+      - -DIMMER_SOURCE_DIR=/run/build/daemon-app/_flatpak_deps/immer
+      # Crash reporting (sentry-native): the pinned release tree
+      # add_subdirectory'd by Dependencies.cmake (builds libsentry.a + the
+      # crashpad_handler executable Packaging.cmake installs to /app/bin, the
+      # co-location crash::defaultHandlerPath() expects). Mirrors daemon-app#default.
+      - -DSENTRY_NATIVE_SOURCE_DIR=/run/build/daemon-app/_flatpak_deps/sentry-native
+      # Compiled-in product DSN (PUBLIC ingest key — safe to embed; owned by the
+      # superproject flake.nix `sentryDsn`). Crash reporting is consent-gated:
+      # nothing is sent until the user opts in ("Send crash reports" in Settings),
+      # so this only sets the endpoint used once consent is granted. Empty ⇒ off.
+      - -DDAEMON_APP_SENTRY_DSN=https://500fed6a24304a5615c66ef479824fe6@o4511727459827712.ingest.de.sentry.io/4511727469199441
+      - -DQMLTERMWIDGET_QML_DIR=/app/lib/qml
+    # Flathub naming: the desktop file, icons, and metainfo launchable must be
+    # keyed to the app id (ai.daemon.app). Done in post-install rather than via
+    # flatpak-builder's rename-icon/rename-desktop-file keys, which the Flathub
+    # linter (flatpak-builder-lint) rejects as unknown module properties.
+    post-install:
+      - |
+        set -eu
+        apps=/app/share/applications
+        mv "$apps/daemon-app.desktop" "$apps/ai.daemon.app.desktop"
+        sed -i 's/^Icon=daemon-app$/Icon=ai.daemon.app/' "$apps/ai.daemon.app.desktop"
+        # Icons install as daemon-app.{png,svg} under hicolor/<size>/apps.
+        find /app/share/icons -type f -name 'daemon-app.*' | while read -r f; do
+          mv "$f" "$(dirname "$f")/ai.daemon.app.${f##*.}"
+        done
+        # Point the metainfo launchable at the renamed desktop id (its <id> is
+        # already ai.daemon.app).
+        mi=/app/share/metainfo/ai.daemon.app.metainfo.xml
+        [ -f "$mi" ] && sed -i \
+          's|>daemon-app.desktop<|>ai.daemon.app.desktop<|' "$mi" || true
+    sources:
+      # Flathub: replace with the pinned daemon-app repo (type: git, tag+commit).
+      - type: dir
+        path: ../../daemon-app
+        skip:
+          - build
+          - build-lint
+          - build-asan
+          - target
+          - .git
+          - result
+          - result-app
+      # Vendored app deps (pins from daemon-app/flake.lock). Header/source trees
+      # extracted next to the app; wired in via the -D<DEP>_SOURCE_DIR flags above.
+      - type: git
+        url: https://invent.kde.org/libraries/md4qt.git
+        commit: 345bba20c225c105dc9050dbb150bcc0d4c0c84f
+        dest: _flatpak_deps/md4qt
+      - type: git
+        url: https://github.com/mapbox/earcut.hpp.git
+        commit: 64530eabb07cfbdf48b2577a763ca26f1afc0b76
+        dest: _flatpak_deps/earcut
+      - type: git
+        url: https://invent.kde.org/frameworks/syntax-highlighting.git
+        commit: ccb31f722406d5b980ba57cf71a3ffab70a82847
+        dest: _flatpak_deps/ksyntaxhighlighting
+      - type: git
+        url: https://github.com/NanoMichael/MicroTeX.git
+        commit: 0e3707f6dafebb121d98b53c64364d16fefe481d
+        dest: _flatpak_deps/microtex
+      - type: git
+        url: https://github.com/nayuki/QR-Code-generator.git
+        commit: 2c9044de6b049ca25cb3cd1649ed7e27aa055138
+        dest: _flatpak_deps/qrcodegen
+      - type: git
+        url: https://github.com/arximboldi/immer.git
+        commit: bd4fc749b97dfa2b66a8f3de00bbf234db4856ef
+        dest: _flatpak_deps/immer
+      # sentry-native OFFICIAL RELEASE .zip (0.15.3): bundles the vendored
+      # crashpad/breakpad/mpack deps (a raw git clone would need submodules), so
+      # the release archive is the supported way to build the SDK. Same pin as
+      # daemon-app/flake.lock (there fetched as file+https and unzipped into
+      # SENTRY_NATIVE_SOURCE_DIR); here flatpak-builder extracts it directly. The
+      # archive lays its files at the root (CMakeLists.txt at top level), so
+      # strip-components: 0. Linux backend is crashpad (SDK default).
+      - type: archive
+        url: https://github.com/getsentry/sentry-native/releases/download/0.15.3/sentry-native.zip
+        sha256: 5feccee8b53167352e234cdee217f050c5f23679b6d661e829f77dfee023327c
+        strip-components: 0
+        dest: _flatpak_deps/sentry-native
