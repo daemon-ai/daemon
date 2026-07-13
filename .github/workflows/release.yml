@@ -192,32 +192,85 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-  # macOS DMG — DISABLED by default. Blocked on M2/M3 landing aarch64-darwin node builds + a
-  # superproject package-dmg selector. To enable: set the repo variable ENABLE_MACOS_RELEASE=true,
-  # pick a runner (GH-hosted macos-14 or the M1 mini as a self-hosted runner), build package-dmg,
-  # stage the .dmg + .sha256, and add `macos` to the publish job's `needs`. (A repo-var gate rather
-  # than a literal `if: false` keeps actionlint clean and makes the toggle a settings change.)
-  # TODO(macos): enable once package-dmg is exposed.
+  # macOS DMG (aarch64-darwin) — runs on the self-hosted M1 mini. `package-dmg` IS wired now (the
+  # superproject bundledDmg -> daemon-app's static-Qt macos-dmg; see flake.nix), so this builds the
+  # real drag-and-drop .dmg. It stays DISABLED until two out-of-band steps are done (deliberately a
+  # repo-var gate, not `if: false`, so enabling is a settings change and actionlint stays clean):
+  #   1. Register the mini as a self-hosted Actions runner with the labels
+  #      [self-hosted, macOS, ARM64] (Settings -> Actions -> Runners). Cap it on the 8 GB mini via
+  #      the daemon's nix.conf (max-jobs = 1, cores = 4) — this job also pins --max-jobs 1 --cores 4.
+  #   2. Set the repo variable ENABLE_MACOS_RELEASE=true.
+  # No DeterminateSystems installer / cachix-action here: the mini already has nix + a warm store
+  # (adding a cachix PUSH step later is optional and out of scope for a self-hosted lane).
   macos:
     if: ${{ vars.ENABLE_MACOS_RELEASE == 'true' }}
-    runs-on: macos-14
+    runs-on: [self-hosted, macOS, ARM64]
+    env:
+      SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+      SENTRY_ORG: daemon-ai
+      SENTRY_PROJECT: daemon
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: cachix/cachix-action@v15
-        with:
-          name: daemon-ai
-          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-      - name: Build macOS DMG (not wired yet)
+      - name: Build macOS DMG
         run: |
-          echo "macOS packaging is not wired yet (needs package-dmg on the superproject)." >&2
-          exit 1
+          # Sealed bundle lane, capped hard for the 8 GB mini (resource discipline: never a bare
+          # -j/$(nproc); one build at a time). nice keeps the shared host responsive.
+          nice -n 19 nix build ".?submodules=1#package-dmg" \
+            --accept-flake-config --max-jobs 1 --cores 4 -L --out-link result-dmg
+      # Upload native debug info so Sentry can symbolicate release minidumps (macOS crashpad
+      # backend). Skipped gracefully when SENTRY_AUTH_TOKEN is absent (fork / secret-less run). The
+      # SHIPPED binaries stay stripped: the Rust debug files come from the dedicated, upload-only
+      # `release-symbols` profile (unstripped + line tables), never packaged.
+      - name: Upload debug symbols to Sentry (macOS)
+        if: ${{ env.SENTRY_AUTH_TOKEN != '' }}
+        env:
+          # Cap cargo too (native aarch64-darwin build on the 8 GB mini).
+          CARGO_BUILD_JOBS: "4"
+        run: |
+          set -euo pipefail
+          # Rust (aarch64-apple-darwin): build the symbol-only variant; does NOT alter the stripped
+          # release binaries the DMG bundles.
+          nice -n 19 nix develop ./daemon-node --command \
+            cargo build --profile release-symbols -p daemon -p daemon-infer
+          nix shell nixpkgs#sentry-cli --command \
+            sentry-cli debug-files upload --include-sources daemon-node/target/release-symbols
+          # C++ (daemon-app + the co-located crashpad_handler): upload any DWARF/dSYM from the built
+          # DMG closure. The static-Qt DMG ships stripped, so this is best-effort until the app flake
+          # exposes a dSYM output. TODO(human): point this at a daemon-app -sym/dSYM output.
+          nix shell nixpkgs#sentry-cli --command \
+            sentry-cli debug-files upload --include-sources result-dmg || \
+            echo "note: no unstripped C++ debug info in result-dmg; wire the app dSYM output"
+      - name: Stage dist/
+        run: |
+          set -euo pipefail
+          version="$(cat VERSION)"
+          mkdir -p dist
+          # The static DMG is named daemon-app-<appver>.dmg in-store; republish it with the product
+          # version + an arch token so release-manifest.sh records arch=aarch64 (its arch_of() parses
+          # the name). Regenerate the .sha256 for the republished name rather than copying the
+          # in-store sidecar (which references the old name).
+          dmg="$(ls result-dmg/*.dmg)"
+          out="daemon-${version}-macos-arm64.dmg"
+          cp -vL "$dmg" "dist/${out}"
+          ( cd dist && shasum -a 256 "${out}" > "${out}.sha256" )
+          ls -la dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/
+          if-no-files-found: error
 
   # Assemble every artifact, generate + sign the update feed, and publish the GitHub Release.
+  # `macos` is in `needs` so publish waits for the DMG WHEN that job runs, but the
+  # `!failure() && !cancelled()` guard lets publish proceed when the macos job is SKIPPED
+  # (ENABLE_MACOS_RELEASE unset) — a skip is neither a failure nor a cancellation. The bulk
+  # download-artifact step below then simply picks up whatever artifacts exist (the DMG when the
+  # macos job produced one), so a skipped macos lane never blocks a Linux/Windows/mobile release.
   publish:
-    needs: [linux, windows, android-wasm]
+    needs: [linux, windows, android-wasm, macos]
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

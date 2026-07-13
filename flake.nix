@@ -682,10 +682,12 @@
         # daemon-node's aarch64-darwin package set; this binding (like bundledDmg) is
         # forced only on that system, so the Linux eval never touches it.
         daemonInferMetal = daemon-node.packages.${system}.daemon-infer-metal;
-        # TODO(static-qt-everything/macos): once nix/macos.nix lands the static
-        # macOS app and re-exposes packages.macos-dmg from the static build,
-        # this .overrideAttrs call may need no change (it already consumes
-        # macos-dmg); verify after the darwin worker completes Phase 3b.
+        # macos-dmg is the static-Qt macOS build (daemon-app/nix/macos.nix): a
+        # self-contained .app (Qt compiled in, no macdeployqt) packaged as a
+        # drag-and-drop .dmg, with sentry-native + the co-located crashpad_handler
+        # wired into the bundle. This .overrideAttrs only injects the sibling node
+        # binaries + the product DSN; it consumes macos-dmg unchanged. Built + crash
+        # smoke-verified on the aarch64-darwin M1 mini via the release.yml macos lane.
         bundledDmg = daemon-app.packages.${system}.macos-dmg.overrideAttrs (old: {
           pname = "daemon-bundled-macos-dmg";
           cmakeFlags = old.cmakeFlags ++ [
