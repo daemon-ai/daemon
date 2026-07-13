@@ -313,6 +313,14 @@
         # daemon-infer (the daemon's own next-to-exe discovery cannot work here: DAEMON_BIN names
         # the daemon package's store path, which contains no worker). The env layer wins over the
         # config default, and an operator override of the variable still wins over ours.
+        # The product Sentry DSN (public ingest key — safe to embed; see docs/crash-reporting.md).
+        # ONE value owned here at the bundle layer and threaded into both children: the app compiles
+        # it in (-DDAEMON_APP_SENTRY_DSN, also the daemon-app child's own default) and reads it at
+        # runtime as $DAEMON_APP_SENTRY_DSN; the node reads it at runtime as $DAEMON_SENTRY_DSN (it is
+        # NOT compiled into the node), so the bundle wrapper must set it for the spawned daemon +
+        # workers. An operator override of either env still wins (--set-default).
+        sentryDsn = "https://500fed6a24304a5615c66ef479824fe6@o4511727459827712.ingest.de.sentry.io/4511727469199441";
+
         bundleWithDaemon =
           { app, name, mainProgram }:
           pkgs.symlinkJoin {
@@ -326,7 +334,9 @@
                     --set-default DAEMON_BIN "${daemonBrowserBin}/bin/daemon" \
                     --set-default DAEMON_INFER__WORKER_BIN "${daemonInferLlama}/bin/daemon-infer" \
                     --set-default DAEMON_APP_SERVICE_MODE "daemon" \
-                    --set-default DAEMON_BUNDLE_VERSION "${bundleVersion}"
+                    --set-default DAEMON_BUNDLE_VERSION "${bundleVersion}" \
+                    --set-default DAEMON_APP_SENTRY_DSN "${sentryDsn}" \
+                    --set-default DAEMON_SENTRY_DSN "${sentryDsn}"
                 fi
               done
             '';
@@ -384,6 +394,9 @@
           "-DDAEMON_APP_BUNDLED_DAEMON_INFER=${daemonInferLlama}/bin/daemon-infer"
           "-DDAEMON_APP_BUNDLED_DAEMON_CLI=${daemonCli}/bin/daemon-cli"
           "-DDAEMON_APP_BUNDLED_LIBS=${lib.concatStringsSep ";" bundledRuntimeLibs}"
+          # Compile the product DSN into the bundled app (the daemon-app child defaults it too; this
+          # keeps the superproject the single owner of the value across every installer lane).
+          "-DDAEMON_APP_SENTRY_DSN=${sentryDsn}"
         ];
 
         # Linux installers (deb / rpm / AppImage): the child's artifact build with the node
@@ -679,6 +692,9 @@
             "-DDAEMON_APP_BUNDLED_DAEMON=${daemonBrowserBin}/bin/daemon"
             "-DDAEMON_APP_BUNDLED_DAEMON_INFER=${daemonInferMetal}/bin/daemon-infer"
             "-DDAEMON_APP_BUNDLED_DAEMON_CLI=${daemonCli}/bin/daemon-cli"
+            # Superproject-owned product DSN (also the daemon-app child default; explicit here so the
+            # DMG lane's compiled-in value is unambiguous). macOS crashpad is the default backend.
+            "-DDAEMON_APP_SENTRY_DSN=${sentryDsn}"
           ];
         });
 

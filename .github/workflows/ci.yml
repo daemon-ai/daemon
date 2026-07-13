@@ -80,38 +80,62 @@ jobs:
             cmake --build build-ci
             QT_QPA_PLATFORM=offscreen ctest --test-dir build-ci --output-on-failure
           '
-      - name: C++ static analysis (clang-format + clang-tidy + qmllint)
+      - name: C++ static analysis (clang-format + clang-tidy + qmllint, diff-scoped)
+        # DIFF-SCOPED: master history has already been gated, so analyze only the files this
+        # change touches (vs the merge-base with origin/master). Whole-tree analysis is reserved
+        # for the manual `just lint-all`; it is deliberately wired into NO workflow — a full
+        # clang-tidy pass re-frontends every TU at full parallelism and must never be an
+        # every-push cost. If the merge-base cannot be resolved (fresh clone shapes), fall back
+        # to the full file list — runner-local and bounded, never silently green.
         run: |
           cd daemon-app
           nix develop --command bash -euo pipefail -c '
-            echo "== clang-format =="
-            git ls-files "src/*.cpp" "src/*.h" "tests/*.cpp" "tests/*.h" | xargs clang-format --dry-run --Werror
-            echo "== clang-tidy (WarningsAsErrors) =="
-            git ls-files "src/*.cpp" | xargs -P"$(nproc)" -n1 clang-tidy -p build-ci --quiet
-            echo "== qmllint =="
-            qmllint_status=0
-            while IFS= read -r -d "" rsp; do qmllint @"$rsp" || qmllint_status=1; done \
-              < <(find build-ci -path "*/.rcc/qmllint/*_module.rsp" -print0)
-            [ "$qmllint_status" -eq 0 ]
+            base=$(git merge-base HEAD origin/master 2>/dev/null || true)
+            if [ -n "$base" ]; then
+              changed=$(git diff --name-only "$base" HEAD)
+            else
+              echo "note: no merge-base with origin/master; falling back to the full file list"
+              changed=$(git ls-files)
+            fi
+            cpp_all=$(printf "%s\n" "$changed" | grep -E "^(src|tests)/.*\.(cpp|h)$" || true)
+            cpp_tus=$(printf "%s\n" "$changed" | grep -E "^src/.*\.cpp$" || true)
+            qml=$(printf "%s\n" "$changed" | grep -E "\.(qml|js)$" || true)
+            echo "== clang-format (changed) =="
+            printf "%s\n" "$cpp_all" | xargs -r clang-format --dry-run --Werror
+            echo "== clang-tidy (changed, WarningsAsErrors) =="
+            printf "%s\n" "$cpp_tus" | xargs -r -P"$(nproc)" -n1 clang-tidy -p build-ci --quiet
+            if [ -n "$qml" ]; then
+              echo "== qmllint =="
+              qmllint_status=0
+              while IFS= read -r -d "" rsp; do qmllint @"$rsp" || qmllint_status=1; done \
+                < <(find build-ci -path "*/.rcc/qmllint/*_module.rsp" -print0)
+              [ "$qmllint_status" -eq 0 ]
+            else
+              echo "== qmllint: no QML changes — skipped =="
+            fi
           '
 
-  # Static-analysis gates mirroring the local `just lint-rust` / `just deny`. Blocking: the Rust
-  # backlog (rustfmt/clippy) and the secret/spell scans are all clean as of this commit. The C++
-  # clang-tidy/clang-format/qmllint gate is now clean too and runs (blocking) in the daemon-app job
-  # above, reusing its build-ci compile database.
+  # Static-analysis gates mirroring the local `just lint` (DIFF-SCOPED — see the justfile).
+  # Blocking: the Rust and secret/spell scans are all clean as of this commit. The C++
+  # clang-tidy/clang-format/qmllint gate runs (blocking, diff-scoped) in the daemon-app job
+  # above, reusing its build-ci compile database. CI never runs the whole-tree `lint-all`:
+  # master history has already been gated commit-by-commit, so only the delta needs analysis.
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          # Full history so the child repos' merge-base with origin/master resolves for the
+          # diff-scoped lint recipes.
+          fetch-depth: 0
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: cachix/cachix-action@v15
         with:
           name: daemon-ai
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-      - name: rustfmt + clippy (-D warnings)
-        run: nix run nixpkgs#just -- lint-rust
+      - name: rustfmt + clippy (-D warnings, diff-scoped)
+        run: nix run nixpkgs#just -- lint-rust-diff
       - name: cargo-deny (advisories / licenses / bans / sources)
         run: nix run nixpkgs#just -- deny
       - name: gitleaks (secret scan)

@@ -18,6 +18,12 @@ jobs:
   # embedded (superproject package-linux / package-portable-tarball).
   linux:
     runs-on: ubuntu-latest
+    # Map the Sentry auth token into the job env so the (optional) symbol-upload step can gate on
+    # its presence — a fork / secret-less dispatch run simply skips it (never fails).
+    env:
+      SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+      SENTRY_ORG: daemon-ai
+      SENTRY_PROJECT: daemon
     steps:
       - uses: actions/checkout@v4
         with:
@@ -41,6 +47,25 @@ jobs:
         run: |
           nix build ".?submodules=1#package-linux" --out-link result-linux -L --accept-flake-config
           nix build ".?submodules=1#package-portable-tarball" --out-link result-portable -L --accept-flake-config
+      # Upload native debug info so Sentry can symbolicate release minidumps. Skipped gracefully when
+      # SENTRY_AUTH_TOKEN is absent (fork / secret-less run). The SHIPPED binaries stay stripped: the
+      # Rust debug files come from the dedicated, upload-only `release-symbols` profile (unstripped +
+      # line tables), and the C++ debug info from the RelWithDebInfo + separateDebugInfo app lane.
+      - name: Upload debug symbols to Sentry (Linux)
+        if: ${{ env.SENTRY_AUTH_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          # Rust: build the symbol-only variant (does NOT alter the stripped release artifacts above).
+          nix develop ./daemon-node --command \
+            cargo build --profile release-symbols -p daemon -p daemon-infer
+          nix shell nixpkgs#sentry-cli --command \
+            sentry-cli debug-files upload --include-sources daemon-node/target/release-symbols
+          # C++ (daemon-app + co-located crashpad_handler): upload the ELF/DWARF from the built app
+          # closure. TODO(human): once the daemon-app flake exposes a RelWithDebInfo `-sym` output,
+          # point this at it; sentry-cli matches debug files to the stripped binaries by build-id.
+          nix shell nixpkgs#sentry-cli --command \
+            sentry-cli debug-files upload --include-sources result-linux || \
+            echo "note: no unstripped C++ debug info in result-linux; wire the app -sym output"
       - name: Stage dist/
         run: |
           set -euo pipefail
@@ -64,6 +89,10 @@ jobs:
   # Windows NSIS installer (MinGW cross; no Windows runner needed).
   windows:
     runs-on: ubuntu-latest
+    env:
+      SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+      SENTRY_ORG: daemon-ai
+      SENTRY_PROJECT: daemon
     steps:
       - uses: actions/checkout@v4
         with:
@@ -85,6 +114,24 @@ jobs:
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
       - name: Build Windows NSIS installer
         run: nix build ".?submodules=1#package-nsis" --out-link result-nsis -L --accept-flake-config
+      # Windows debug info. The MinGW lane uses the breakpad backend (Crashpad needs MSVC — see
+      # docs/crash-reporting.md), so minidumps symbolicate against the cross-built binaries' DWARF.
+      # Skipped gracefully without the secret.
+      - name: Upload debug symbols to Sentry (Windows)
+        if: ${{ env.SENTRY_AUTH_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          # Rust (windows-gnu) symbol-only build; shipped .exe stays stripped.
+          nix develop ./daemon-node --command \
+            cargo build --profile release-symbols --target x86_64-pc-windows-gnu -p daemon -p daemon-infer || \
+            echo "note: verify the windows-gnu target is available in the node devShell"
+          nix shell nixpkgs#sentry-cli --command \
+            sentry-cli debug-files upload --include-sources daemon-node/target/x86_64-pc-windows-gnu/release-symbols || true
+          # C++ (daemon-app.exe + the breakpad-linked worker): upload the PE/DWARF from the built
+          # installer tree. TODO(human): wire the app -sym output for the cross build.
+          nix shell nixpkgs#sentry-cli --command \
+            sentry-cli debug-files upload --include-sources result-nsis || \
+            echo "note: no unstripped C++ debug info in result-nsis; wire the app -sym output"
       - name: Stage dist/
         run: |
           set -euo pipefail
@@ -174,6 +221,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+      SENTRY_ORG: daemon-ai
+      SENTRY_PROJECT: daemon
     steps:
       - uses: actions/checkout@v4
         with:
@@ -240,3 +291,17 @@ jobs:
             --title "daemon ${GITHUB_REF_NAME}" \
             --generate-notes \
             "${prerelease[@]}"
+      # Finalize the Sentry releases so the uploaded debug files (from the linux/windows jobs) are
+      # associated with a resolvable release. The release strings match the ones compiled/derived in
+      # the app + node crash init (`daemon-app@<ver>` / `daemon-node@<ver>`). Skipped gracefully
+      # without the secret (fork / secret-less run).
+      - name: Finalize Sentry releases
+        if: ${{ github.ref_type == 'tag' && env.SENTRY_AUTH_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          app_version="$(cat daemon-app/VERSION)"
+          node_version="$(cat daemon-node/VERSION)"
+          for rel in "daemon-app@${app_version}" "daemon-node@${node_version}"; do
+            nix shell nixpkgs#sentry-cli --command sentry-cli releases new "$rel"
+            nix shell nixpkgs#sentry-cli --command sentry-cli releases finalize "$rel"
+          done

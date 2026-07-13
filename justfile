@@ -635,9 +635,135 @@ dev-reset:
 # pinned versions everywhere. `lint` is the umbrella gate; the sub-recipes run a single
 # language. The Rust gate uses default features to mirror the workspace CI gate (the engine
 # lanes - llama/mistralrs/hyperon - are deliberately separate outputs that need native libs).
+#
+# `lint` is DIFF-SCOPED: it lints only what changed vs each child repo's merge-base with
+# origin/master (override the base with LINT_BASE=<ref>), plus uncommitted work. History at the
+# base has already been linted (CI gates master), so re-linting the whole tree on every local
+# iteration is waste — clippy compiles the entire workspace and clang-tidy re-frontends every TU
+# at -P$(nproc). The full-tree gate remains `just lint-all` (manual pre-release / post-rebase
+# only — deliberately wired into NO workflow). Parallelism for the heavy steps is capped with
+# LINT_JOBS (default: HALF the cores, so a lint can never monopolize the machine).
 
-# Run every fast static gate (version consistency + Rust + C++/QML + secrets + spelling + schema).
-lint: check-version lint-rust lint-cpp secrets spell check-schema check-config-reference
+# Diff-scoped static gate: version consistency + changed-file Rust + C++/QML + secrets + spelling
+# + schema/config gates (the latter two only when their inputs changed).
+lint: check-version lint-rust-diff lint-cpp-diff secrets spell check-schema-diff check-config-reference-diff
+
+# Whole-tree static gate (manual pre-release / post-rebase only; NEVER wire into CI or agent
+# loops): everything, regardless of what changed.
+lint-all: check-version lint-rust lint-cpp secrets spell check-schema check-config-reference
+
+# Changed files in a child repo vs its lint base (merge-base with origin/master, or LINT_BASE),
+# unioned with staged/unstaged/untracked work. Used by the *-diff recipes below.
+[private]
+_lint-changed repo:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd {{ repo }}
+    base="${LINT_BASE:-}"
+    if [ -z "$base" ]; then
+      base=$(git merge-base HEAD origin/master 2>/dev/null || true)
+    fi
+    { [ -n "$base" ] && git diff --name-only "$base" HEAD || true
+      git status --porcelain | awk '{print $NF}'
+    } | sort -u | while IFS= read -r f; do [ -e "$f" ] && printf '%s\n' "$f"; done
+
+# Rust: rustfmt (whole-tree; it is cheap) + clippy scoped to the crates owning changed files.
+# A root Cargo.toml/Cargo.lock change prints a warning but stays scoped (set LINT_STRICT=1 to
+# force --workspace in that case); dependents of a bumped dep are CI/lint-all's job.
+lint-rust-diff:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    changed=$(just _lint-changed daemon-node)
+    rust=$(printf '%s\n' "$changed" | grep -E '\.rs$|Cargo\.toml$|Cargo\.lock$' || true)
+    if [ -z "$rust" ]; then
+      echo "lint-rust-diff: no Rust changes vs base — skipped (run 'just lint-rust' for the full gate)"
+      exit 0
+    fi
+    cd daemon-node
+    scope=()
+    root_manifest=0
+    declare -A seen=()
+    while IFS= read -r f; do
+      case "$f" in
+        Cargo.toml|Cargo.lock) root_manifest=1; continue ;;
+      esac
+      d=$(dirname "$f")
+      while [ "$d" != "." ] && [ ! -f "$d/Cargo.toml" ]; do d=$(dirname "$d"); done
+      [ -f "$d/Cargo.toml" ] || continue
+      name=$(sed -n 's/^name *= *"\(.*\)".*/\1/p' "$d/Cargo.toml" | head -1)
+      [ -n "$name" ] && seen["$name"]=1
+    done <<< "$rust"
+    for p in "${!seen[@]}"; do scope+=(-p "$p"); done
+    if [ "$root_manifest" = 1 ] && [ "${LINT_STRICT:-0}" = 1 ]; then
+      scope=(--workspace)
+    elif [ "$root_manifest" = 1 ]; then
+      echo "lint-rust-diff: NOTE root Cargo.toml/Cargo.lock changed; still scoping clippy to touched crates (LINT_STRICT=1 or 'just lint-rust' for --workspace)"
+    fi
+    [ ${#scope[@]} -eq 0 ] && scope=(--workspace)
+    echo "lint-rust-diff: clippy scope: ${scope[*]}"
+    nix develop --command bash -euo pipefail -c "
+      export CARGO_BUILD_JOBS=\"\${LINT_JOBS:-$(( $(nproc) / 2 ))}\"
+      cargo fmt --check
+      cargo clippy ${scope[*]} --all-targets -- -D warnings"
+
+# C++/QML: incremental build (needed for compile_commands + generated headers), then
+# clang-format + clang-tidy over ONLY the changed sources, and qmllint only when QML changed.
+lint-cpp-diff:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    changed=$(just _lint-changed daemon-app)
+    cpp=$(printf '%s\n' "$changed" | grep -E '^(src|tests)/.*\.(cpp|h)$' || true)
+    qml=$(printf '%s\n' "$changed" | grep -E '\.(qml|js)$' || true)
+    buildish=$(printf '%s\n' "$changed" | grep -E '(^|/)CMakeLists\.txt$|^cmake/|\.cmake$' || true)
+    if [ -z "$cpp" ] && [ -z "$qml" ] && [ -z "$buildish" ]; then
+      echo "lint-cpp-diff: no C++/QML/CMake changes vs base — skipped (run 'just lint-cpp' for the full gate)"
+      exit 0
+    fi
+    cd daemon-app
+    export DA_LINT_CPP="$cpp" DA_LINT_QML="$qml"
+    nix develop --command bash -euo pipefail -c '
+      jobs="${LINT_JOBS:-'"$(( $(nproc) / 2 ))"'}"
+      # <DEP>_SOURCE_DIR vars are exported by the devShell; CMake reads them from the env.
+      cmake -B build-lint -G Ninja -DBUILD_TESTING=ON -DDAEMON_APP_TUI=ON >/dev/null
+      cmake --build build-lint -j "$jobs" >/dev/null
+      if [ -n "$DA_LINT_CPP" ]; then
+        echo "== clang-format (changed) =="
+        printf "%s\n" "$DA_LINT_CPP" | xargs -r clang-format --dry-run --Werror
+        echo "== clang-tidy (changed) =="
+        printf "%s\n" "$DA_LINT_CPP" | grep -E "^src/.*\.cpp$" \
+          | xargs -r -P "$jobs" -n1 clang-tidy -p build-lint --quiet
+      fi
+      if [ -n "$DA_LINT_QML" ]; then
+        echo "== qmllint =="
+        qmllint_status=0
+        while IFS= read -r -d "" rsp; do
+          qmllint @"$rsp" || qmllint_status=1
+        done < <(find build-lint -path "*/.rcc/qmllint/*_module.rsp" -print0)
+        [ "$qmllint_status" -eq 0 ]
+      fi
+    '
+
+# Schema-drift gate, run only when its inputs changed (the stores or their goldens).
+check-schema-diff:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    changed=$(just _lint-changed daemon-node)
+    if printf '%s\n' "$changed" | grep -qE 'daemon-store|daemon-context-lcm|daemon-mnemosyne|schema.*\.sql'; then
+      just check-schema
+    else
+      echo "check-schema-diff: store crates unchanged vs base — skipped"
+    fi
+
+# Config-reference drift gate, run only when config surfaces or the doc changed.
+check-config-reference-diff:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    changed=$(just _lint-changed daemon-node)
+    if printf '%s\n' "$changed" | grep -qE 'bins/daemon/src/config|/config\.rs$|docs/config-reference\.md'; then
+      just check-config-reference
+    else
+      echo "check-config-reference-diff: config surface unchanged vs base — skipped"
+    fi
 
 # On-disk schema-drift gate: each rusqlite store's live schema must match its committed golden
 # (the on-disk analogue of `codec-drift`). A DDL change must add a migration AND refresh the golden
@@ -660,8 +786,11 @@ update-config-reference:
       cargo run -q -p daemon --bin daemon -- config reference > docs/config-reference.md'
 
 # Rust: rustfmt check + clippy with warnings denied (the de-facto lint gate).
+# Whole-workspace — expensive; prefer `just lint` (diff-scoped). Jobs capped at LINT_JOBS
+# (default half the cores) so the gate can never monopolize the machine.
 lint-rust:
     cd daemon-node && nix develop --command bash -euo pipefail -c '\
+      export CARGO_BUILD_JOBS="${LINT_JOBS:-$(( $(nproc) / 2 ))}" && \
       cargo fmt --check && \
       cargo clippy --workspace --all-targets -- -D warnings'
 
@@ -676,15 +805,17 @@ lint-cpp:
     set -euo pipefail
     cd daemon-app
     nix develop --command bash -euo pipefail -c '
+      # Jobs capped at LINT_JOBS (default half the cores) — never bare $(nproc).
+      jobs="${LINT_JOBS:-$(( $(nproc) / 2 ))}"
       # <DEP>_SOURCE_DIR vars are exported by the devShell; CMake reads them from the env.
       cmake -B build-lint -G Ninja -DBUILD_TESTING=ON -DDAEMON_APP_TUI=ON >/dev/null
-      cmake --build build-lint >/dev/null
+      cmake --build build-lint -j "$jobs" >/dev/null
       echo "== clang-format =="
       git ls-files "src/*.cpp" "src/*.h" "tests/*.cpp" "tests/*.h" \
         | xargs clang-format --dry-run --Werror
       echo "== clang-tidy =="
       # clang-tools ships clang-tidy but not the run-clang-tidy wrapper; drive it per-TU in parallel.
-      git ls-files "src/*.cpp" | xargs -r -P "$(nproc)" -n1 clang-tidy -p build-lint --quiet
+      git ls-files "src/*.cpp" | xargs -r -P "$jobs" -n1 clang-tidy -p build-lint --quiet
       echo "== qmllint =="
       # The aggregate all_qmllint target is broken under Qt 6.11 + Ninja (an unexpanded $<IF:...>
       # generator expression - a Qt/CMake bug, not a QML defect). Drive qmllint per module via the
@@ -759,8 +890,8 @@ audit-cleanup:
         --enable=unusedFunction --inline-suppr --quiet \
         --suppress="*:*/nix/store/*" -i "$PWD/build-lint" 2>&1 | grep -v "checkers" || true
       echo "==== clang-tidy include-cleaner (unused #includes) ===="
-      cmake --build build-lint >/dev/null
-      git ls-files "src/*.cpp" | xargs -r -P "$(nproc)" -n1 \
+      cmake --build build-lint -j "${LINT_JOBS:-$(( $(nproc) / 2 ))}" >/dev/null
+      git ls-files "src/*.cpp" | xargs -r -P "${LINT_JOBS:-$(( $(nproc) / 2 ))}" -n1 \
         clang-tidy -p build-lint --quiet -checks="-*,misc-include-cleaner" || true
     '
     cd .. && just dup || true

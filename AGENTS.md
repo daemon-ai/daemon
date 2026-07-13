@@ -21,13 +21,36 @@ layer — UI work that lands GUI-only without its TUI counterpart is incomplete 
 
 ## Before you call any change "done"
 
-- `just lint`   # rustfmt + clippy (-D warnings) + clang-tidy + clang-format + qmllint + secrets + spell
+- `just lint`   # DIFF-SCOPED: rustfmt + clippy (-D warnings) + clang-tidy + clang-format +
+                # qmllint + secrets + spell over what changed vs origin/master (LINT_BASE overrides)
 - `just deny`   # dependency advisories / licenses / bans / sources
 - Build + test what you touched: `just build-all`, and the relevant `just e2e` / per-repo tests.
 
 Install the hooks once per clone: `just install-hooks` (pre-commit for all three repos, plus
 the superproject-only pre-push signed-commit gate). Never bypass them (`git commit --no-verify`
 and `git push --no-verify` are forbidden).
+
+## Resource discipline (non-negotiable — a violation has hard-crashed the host before)
+
+Committed history has already been gated; only the delta ever needs re-checking. An unbounded
+gate is not "thorough", it is an outage: a whole-tree clippy + clang-tidy at `-P$(nproc)` stacked
+with nix builds has thrashed this machine into swap and forced a hard reboot.
+
+- **Never run `just lint-all`** (or hand-rolled whole-tree clippy / clang-tidy sweeps) as an agent
+  or in CI. It exists for a human's explicit pre-release / post-rebase pass only. `just lint` is
+  diff-scoped and is the gate.
+- **Cap every build.** The lint recipes default to half the cores (`LINT_JOBS`); match that
+  discipline everywhere else: `cargo … -j N` / `CARGO_BUILD_JOBS=N`, `cmake --build -j N`,
+  `nix build --max-jobs 1 --cores N` with N ≤ nproc/2. Never bare `-j`/`-P$(nproc)`.
+- **One build at a time.** Never stack a `nix build` with a cargo/cmake build or another
+  `nix build`. Iterate in the devShells (warm incremental builds); sealed `nix build` package
+  lanes run at most once, at the end — or are left to hosted CI.
+- **Kills must be verified.** Killing a `nix build` client does NOT reliably stop daemon-side
+  builders. After a kill, confirm with `pgrep -f 'cc1plus|rustc|makensis|ninja'` that compilation
+  actually stopped before starting anything else.
+- **Keep cargo's target dir repo-local.** The daemon-node devShell repins a tmp-located
+  `CARGO_TARGET_DIR` (agent-sandbox cache redirects) to `<checkout>/target`; without that, every
+  invocation cold-builds the whole workspace. Don't route cargo around the devShell.
 
 ## Fast iteration loop (runtime verification, not a gate)
 
